@@ -178,9 +178,13 @@ if code not in (200, 201):
 tree_sha = r["sha"]
 
 code, r = call("POST", f"/repos/{OWNER}/{REPO}/git/commits", {
-    "message": "build: AX3000T(stock) 定制固件编译方案\n\n"
-               "编译器：fanchmwrt-25.12.4 / mediatek-filogic\n"
-               "插件：passwall · homeproxy · easytier · frps · vlmcsd · rtp2httpd · ddns-dnspod · sftp-server",
+    "message": "feat: sing-box 换 tiny 变体 + 加入 luci-app-pushbot / bind-host\n\n"
+               "编译器：fanchmwrt-25.12.4 / mediatek-filogic / xiaomi_mi-router-ax3000t (stock)\n"
+               "- sing-box → sing-box-tiny（PROVIDES:=sing-box，CONFLICTS:=sing-box）\n"
+               "  同时关掉 PassWall 的 INCLUDE_SingBox（无条件 select PACKAGE_sing-box）\n"
+               "- 新增 luci-app-pushbot（克隆到 package/，根目录即包目录不能当 feed）\n"
+               "- 新增 bind-host（官方 packages feed 的 net/bind 子包）\n"
+               "- 校验步骤增加互斥检查：CONFIG_PACKAGE_sing-box 必须未启用",
     "tree": tree_sha,
     "parents": [head_sha],
 })

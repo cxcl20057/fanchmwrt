@@ -22,6 +22,9 @@
 | `luci-app-frps` + `frps` | **OpenWrt 官方 feed**（不用 immortalwrt） | 直接 `.config` 勾选 | 官方 luci/packages feed 已自带，版本与源码树同年同代，更稳 |
 | `ddns-scripts-dnspod` | **OpenWrt 官方 feed** | 直接 `.config` 勾选 | 官方 `net/ddns-scripts` 已含 `ddns-scripts-dnspod`、`-dnspod-v3` |
 | `openssh-sftp-server` | **核心源码树** `package/network/services/openssh` | 直接 `.config` 勾选 | 无需任何 feed |
+| `sing-box-tiny`（**替换** `sing-box` full 版） | **OpenWrt 官方 feed** `net/sing-box` | 直接 `.config` 勾选 | 同一个 Makefile 产出 `sing-box`(full, `DEFAULT_VARIANT`) 与 `sing-box-tiny`；tiny 带 `PROVIDES:=sing-box` + `CONFLICTS:=sing-box`，装的是同一个 `/usr/bin/sing-box`，可顶替 |
+| `bind-host` | **OpenWrt 官方 feed** `net/bind` | 直接 `.config` 勾选 | `net/bind` 拆出的最小子包，提供 `/usr/bin/host`；`bind-libs` 由依赖带入 |
+| `luci-app-pushbot` | zzsj0928/luci-app-pushbot `master` | **克隆进 `package/`** 当本地包（非 feed） | 仓库是「根目录即包目录」结构，Makefile 在仓库根，**当不了 feed**；纯 ucode，要求 LuCI ≥ 23.05 |
 
 > 你原话提到「immortalwrt 25.12.2 里有以上插件」——核实结果：**immortalwrt 25.12.2
 > 的包仓库确实是 `.apk` 格式（aarch64_cortex-a53）**，上述插件在里面全部存在。
@@ -51,12 +54,13 @@ config/ax3000t-stock.config             增量配置（目标设备 + 插件清�
 2. 浅克隆 fanchmwrt 源码
 3. 稀疏拉取 immortalwrt 扩展包 → `$WORKSPACE/immortalwrt-src/{luci,packages}`
 4. `diy-part1.sh` 追加 feed
-5. `feeds update -a`
-6. **官方 feed 逐个 `install -a`** + **第三方 feed 白名单 install**
-7. 去重保险：删掉第三方与官方重名的软链
-8. 可选套用 `feeds_patches/luci`
-9. `make defconfig` + **关键包校验（缺一个就 fail）**
-10. `make download` → `make -j` → 上传 artifact
+5. **克隆 `luci-app-pushbot` 到 `package/`**（本地包，非 feed）
+6. `feeds update -a`
+7. **官方 feed 逐个 `install -a`** + **第三方 feed 白名单 install**
+8. 去重保险：删掉第三方与官方重名的软链
+9. 可选套用 `feeds_patches/luci`
+10. `make defconfig` + **关键包校验（缺一个就 fail）+ 互斥校验（sing-box full 不得为 y）**
+11. `make download` → `make -j` → 上传 artifact
 
 ---
 
@@ -122,15 +126,17 @@ AX3000T stock 布局（来自 `target/linux/mediatek/dts/mt7981b-xiaomi-mi-route
 | 组件 | 约占用 |
 |---|---|
 | `xray-core` | 8–12 MB |
-| `sing-box`（passwall 与 homeproxy 共用一份） | 10–15 MB |
+| `sing-box-tiny`（passwall 与 homeproxy 共用一份） | 8–10 MB（full 版是 18–22 MB，**换 tiny 回收约 10 MB**） |
 | `geoview` + 数据 | 4–6 MB |
 | `shadowsocks-rust` + `shadowsocksr-libev` + `simple-obfs` + `v2ray-plugin` | 6–8 MB |
 | `haproxy` | 1–2 MB |
 | `easytier`（含 web 控制台） | 10–15 MB |
 | `frps` / `vlmcsd` / `rtp2httpd` | 各 2–5 MB |
+| `bind-host` + `bind-libs` | 1.5–2 MB（动态库占大头，`host` 本身几十 KB） |
+| `luci-app-pushbot`（`jq`/`curl`/`iputils-arping` 依赖另计） | < 1 MB（纯脚本） |
 | LuCI + 中文语言包 | 8–10 MB |
 
-合计约 **50–65 MB**，落在 78 MiB 里但**余量不大**。
+合计约 **50–60 MB**，落在 78 MiB 里。
 若刷完发现剩余空间紧张，优先关掉这几项（改 `config/ax3000t-stock.config` 后重跑）：
 
 - `CONFIG_EASYTIER_INCLUDE_WEBCONSOLE=n`（easytier-web 是最大头）
@@ -146,7 +152,9 @@ AX3000T stock 布局（来自 `target/linux/mediatek/dts/mt7981b-xiaomi-mi-route
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | PassWall 面板能开但代理不通 | 防火墙走的是 `firewall4`/nftables | 确认配置里 `luci-app-passwall_Nftables_Transparent_Proxy=y`，且 `kmod-nft-tproxy`、`kmod-nft-socket` 已编译进去（配置已显式固定） |
-| HomeProxy 启动报 sing-box 配置错误 | 官方 feed 的 sing-box 是 1.14.0，immortalwrt 25.12.2 用的是 1.12.25，配置结构在 1.13 有变更 | 若命中，去掉 `package/feeds/passwall_luci` 之类冲突，或临时改用 passwall_packages 里的 sing-box；也可只在 `.config` 保留 homeproxy、不用 passwall |
+| HomeProxy 启动报 sing-box 配置错误 | fanchmwrt 把 packages feed 锁在 `f91b06b3`（2026-05-13），该提交里 sing-box 是 **1.12.17**；immortalwrt 25.12.2 用的是 1.12.25 —— 同属 1.12.x 线，配置结构兼容 | 若真命中，改用 `box` 之外的 core 或临时把 `CONFIG_PACKAGE_sing-box-tiny=n` + `INCLUDE_SingBox=y` 回到 full 版 |
+| 组装阶段报 `sing-box` 与 `sing-box-tiny` 冲突 | 两者带 `CONFLICTS`，同时进固件必然爆 | 校验步骤已把 `CONFIG_PACKAGE_sing-box` 列为**必须未启用**，会在编译前 5 分钟内拦下 |
+| `luci-app-pushbot` 菜单不出现 / 页面空白 | 它是纯 ucode 架构（无 Lua/CBI），依赖 LuCI ≥ 23.05 的 ucode 控制器；另外它需要 `jq`、`curl`、`iputils-arping` | 确认 `CONFIG_PACKAGE_luci-app-pushbot=y`（依赖已自动带入）；若 kernel 日志显示 ucode 报错，说明该 LuCI 分支过旧 |
 | `feeds install` 阶段报 `No feed for package 'xxx'` | 依赖名与预期不符（上游改了包名） | 到日志里搜该包名，在 `diy-part1.sh` 后单独补一条白名单安装 |
 | 编译到一半 OOM | `-j5` 在 16GB runner 上跑满 | 把 `make -j$(( $(nproc) + 1 ))` 改成 `make -j2` |
 | 打不开 `luci-app-rtp2httpd` 页面但装上了 | 只装了 LuCI 没装守护进程 | 配置里已同时勾了 `rtp2httpd`，校验步骤会拦；若手动改动请一并保留 |
@@ -156,10 +164,17 @@ AX3000T stock 布局（来自 `target/linux/mediatek/dts/mt7981b-xiaomi-mi-route
 
 ## 八、常见改动指引
 
-**加插件**：先确认它属于哪个 feed。
+**加插件**：先看它的 Makefile 在哪一层 —— 这决定引入方式。
 - 官方 feed 里有 → 直接在 `config/ax3000t-stock.config` 加 `CONFIG_PACKAGE_xxx=y`
-- 第三方独立仓库且 Makefile 在**子目录** → `diy-part1.sh` 加 `src-git`，再加白名单安装
-- Makefile 在**仓库根目录** → 不能当 feed，只能 sparse-checkout + `src-link`
+- 第三方仓库，Makefile 在 `<包名>/`（子目录）→ `diy-part1.sh` 加 `src-git`，再白名单 `feeds install -p <feed> <包名>`
+- 第三方仓库，多个包散在子目录里（如 immortalwrt/luci 的 `applications/*`）→ sparse-checkout 后以 `src-link` 挂载
+- **单包仓库且 Makefile 就在仓库根**（如 `luci-app-pushbot`）→ **不能当 feed**：`scripts/feeds` 的 crawl 只下探一层找 `<feed>/<包名>/Makefile`，仓库根的 Makefile 永远扫不到。此时直接 `git clone <url> package/<包名>` 当本地包，这也是这类插件的通用做法。
+
+> 判断技巧：feed 根目录下必须有 `包名/Makefile` 这一层。`luci-app-pushbot` 仓库根就是包目录 → 走 `package/` 克隆；`immortalwrt/luci` 的包在 `applications/` 下 → 可以当 feed。
+
+**换 sing-box 变体**：`config` 里 `CONFIG_PACKAGE_sing-box-tiny=y` 与 `# CONFIG_PACKAGE_sing-box is not set` 必须成对出现；
+且 `CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox` 必须为 `n`（它是无条件 `select PACKAGE_sing-box`，开着的另一支会把 full 版硬拉回来）。
+HomeProxy 走的是虚拟依赖 `+sing-box`，tiny 因为 `PROVIDES:=sing-box` 能自动顶替，无需改它。
 
 **切成大分区（OpenWrt U-Boot 布局）**：把 `config/ax3000t-stock.config` 里设备名改成
 `xiaomi_mi-router-ax3000t-ubootmod`，并把 `CONFIG_TARGET_..._DEVICE_xiaomi_mi-router-ax3000t`

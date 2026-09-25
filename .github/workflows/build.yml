@@ -92,6 +92,31 @@ jobs:
           chmod +x diy-part1.sh
           ./diy-part1.sh
 
+      # luci-app-pushbot 是「根目录即包目录」的单包仓库（Makefile 在仓库根），
+      # 这种结构当不了 feed：scripts/feeds 的 crawl 只认 <feed>/<包名>/Makefile 这一层，
+      # 仓库根的 Makefile 永远扫不到。所以直接克隆进 package/ 当本地包 —— 上游 CI 也是这么做的。
+      - name: 注入 luci-app-pushbot（本地包，非 feed）
+        run: |
+          set -e
+          cd openwrt
+          rm -rf package/luci-app-pushbot
+          git clone --depth 1 --single-branch --branch master \
+            https://github.com/zzsj0928/luci-app-pushbot.git package/luci-app-pushbot
+          # 只留包本体：.git 没用，.github 里是上游自己的 workflow
+          rm -rf package/luci-app-pushbot/.git package/luci-app-pushbot/.github
+
+          test -f package/luci-app-pushbot/Makefile \
+            || { echo "!! pushbot/Makefile 不存在，克隆异常"; exit 1; }
+          # scan.mk 用 `grep -aHE 'call (Build/DefaultTargets|BuildPackage|KernelPackage)'`
+          # 发现包；该 Makefile 末尾那行 `# call BuildPackage - OpenWrt buildroot signature`
+          # 注释正是为此存在。这里前置断言，避免扫不到后静默漏包。
+          grep -qE 'call (Build/DefaultTargets|BuildPackage|KernelPackage)' package/luci-app-pushbot/Makefile \
+            || { echo "!! pushbot/Makefile 缺 BuildPackage 标记，scan.mk 会扫不到"; exit 1; }
+          grep -q 'feeds/luci/luci.mk' package/luci-app-pushbot/Makefile \
+            || { echo "!! pushbot/Makefile 的 luci.mk include 路径变了，需人工确认"; exit 1; }
+          echo "pushbot 版本：$(grep -E '^PKG_VERSION' package/luci-app-pushbot/Makefile)"
+          ls package/luci-app-pushbot
+
       - name: 更新 feeds
         run: |
           cd openwrt
@@ -115,6 +140,18 @@ jobs:
 
           echo "===== 2) 第三方 feed 白名单安装 ====="
           ./scripts/feeds install -p passwall_luci      luci-app-passwall
+
+          # ★ PassWall 的可选组件不在 LUCI_DEPENDS 里，只由 Kconfig 的 select 引用：
+          #     LUCI_DEPENDS 只含 chinadns-ng / dns2socks / tcping / microsocks 等固定项，
+          #     而 geoview / ipt2socks / simple-obfs / v2ray-plugin / shadowsocks-rust /
+          #     shadowsocksr-libev 全是 `select PACKAGE_xxx`。
+          #   feeds install 不会递归带上这些 → 源包不在 package/feeds/ 时 PACKAGE_xxx
+          #   符号根本不存在，select 静默空转，config 里的 INCLUDE_* 就成了空设置。
+          #   （实测：run #5 就是因此丢了 geoview 和 ipt2socks）
+          #   → 必须显式安装源包。此处仅"装入 feeds"，是否编译由 .config 决定。
+          ./scripts/feeds install -p passwall_packages  \
+            geoview ipt2socks simple-obfs v2ray-plugin shadowsocks-rust shadowsocksr-libev
+
           ./scripts/feeds install -p luci_app_easytier  luci-app-easytier easytier
           ./scripts/feeds install -p immortalwrt_packages vlmcsd rtp2httpd
           ./scripts/feeds install -p immortalwrt_luci   luci-app-vlmcsd luci-app-rtp2httpd luci-app-homeproxy
@@ -185,11 +222,40 @@ jobs:
             CONFIG_PACKAGE_rtp2httpd
             CONFIG_PACKAGE_ddns-scripts-dnspod
             CONFIG_PACKAGE_openssh-sftp-server
+            CONFIG_PACKAGE_geoview
+            CONFIG_PACKAGE_ipt2socks
+            CONFIG_PACKAGE_simple-obfs-client
+            CONFIG_PACKAGE_v2ray-plugin
+            CONFIG_PACKAGE_shadowsocks-rust-sslocal
+            CONFIG_PACKAGE_shadowsocksr-libev-ssr-local
+            CONFIG_PACKAGE_sing-box-tiny
+            CONFIG_PACKAGE_bind-host
+            CONFIG_PACKAGE_luci-app-pushbot
+            CONFIG_PACKAGE_luci-i18n-pushbot-zh-cn
           "
           fail=0
           for k in $REQUIRED; do
             if grep -q "^$k=y" .config; then echo "  [OK]   $k=y"; else echo "  [FAIL] $k 未启用"; fail=1; fi
           done
+
+          # sing-box 只允许 tiny 变体：full 版和 tiny 带 CONFLICTS，同时进固件会让组装阶段报包冲突。
+          # 尤其要盯住 PassWall 的 INCLUDE_SingBox —— 它是无条件 select PACKAGE_sing-box。
+          echo "===== 互斥校验（必须未启用）====="
+          FORBIDDEN="
+            CONFIG_PACKAGE_sing-box
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox
+          "
+          for k in $FORBIDDEN; do
+            if grep -q "^$k=y" .config; then
+              echo "  [FAIL] $k=y —— 会与 sing-box-tiny 冲突"; fail=1
+            else
+              echo "  [OK]   $k 未启用"
+            fi
+          done
+
+          echo "----- sing-box 变体实况 -----"
+          grep -E '^CONFIG_PACKAGE_sing-box|^# CONFIG_PACKAGE_sing-box' .config || echo "  (无)"
+
           [ "$fail" -eq 0 ] || { echo "配置校验失败，终止编译"; exit 1; }
 
           echo "===== 磁盘占用 ====="; df -h /; du -sh . 2>/dev/null || true
@@ -234,6 +300,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fanchmwrt-ax3000t-stock-logs
+          # .config 是隐藏文件，upload-artifact@v4 默认会跳过隐藏文件，
+          # 不加这一行日志产物根本不会生成（run #5 就是空的）。
+          include-hidden-files: true
           path: |
             openwrt/logs/
             openwrt/.config
@@ -247,7 +316,9 @@ jobs:
           name: fanchmwrt-ax3000t-stock-${{ github.run_number }}
           path: |
             openwrt/bin/targets/${{ env.TARGET }}/*.bin
+            openwrt/bin/targets/${{ env.TARGET }}/*.ubi
             openwrt/bin/targets/${{ env.TARGET }}/*.itb
+            openwrt/bin/targets/${{ env.TARGET }}/*.tar.gz
             openwrt/bin/targets/${{ env.TARGET }}/*.manifest
             openwrt/bin/targets/${{ env.TARGET }}/packages/**
           if-no-files-found: warn
