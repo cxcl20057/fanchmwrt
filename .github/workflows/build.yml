@@ -344,13 +344,24 @@ jobs:
           print("已打补丁：distfeeds.list 只保留官方源")
           PY
 
-          # 断言：FeedSourcesAppendAPK 调用必须消失，且 7 条源都在
-          if grep -q 'FeedSourcesAppendAPK' package/base-files/Makefile; then
+          # 断言①：真正的调用形式必须消失。
+          # ⚠️ 只匹配「$(call …,$(」这种调用形式，不能用裸宏名 ——
+          # 上面新加的注释里提到了这个宏名，裸名 grep 会被自己的注释命中，
+          # 表现就是「补丁明明打上了，却报补丁没生效」。（这个坑已踩过一次）
+          if grep -qF 'FeedSourcesAppendAPK,$(' package/base-files/Makefile; then
             echo "!! 补丁没生效：仍有 FeedSourcesAppendAPK 调用"; exit 1
           fi
-          n=$(grep -c "packages.adb';" package/base-files/Makefile)
+          # 断言②：官方源条目数必须正好 7
+          n=$(grep -cF "packages.adb';" package/base-files/Makefile)
           echo "  distfeeds 官方源条目数：$n（应为 7）"
           [ "$n" -eq 7 ] || { echo "!! 条目数不对，终止"; exit 1; }
+          # 断言③：VERSION_SED_SCRIPT 必须在（%U→VERSION_REPO、%S→board/subtarget、%A→ARCH_PACKAGES
+          # 全靠它对 distfeeds.list 做替换；丢了这行，固件里的源会带着 %U 字面量）
+          grep -qF '$(VERSION_SED_SCRIPT) $(1)/etc/apk/repositories.d/distfeeds.list' \
+            package/base-files/Makefile \
+            || { echo "!! VERSION_SED_SCRIPT 行不见了，%U/%S/%A 不会被替换"; exit 1; }
+          echo "----- 打补丁后的段落（应只剩 7 条官方源）-----"
+          grep -n -A 12 -F 'mkdir -p $(1)/etc/apk/repositories.d' package/base-files/Makefile
 
       - name: 载入配置并生成完整 .config
         run: |
