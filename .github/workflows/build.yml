@@ -240,21 +240,30 @@ jobs:
 
           # sing-box 只允许 tiny 变体：full 版和 tiny 带 CONFLICTS，同时进固件会让组装阶段报包冲突。
           # 尤其要盯住 PassWall 的 INCLUDE_SingBox —— 它是无条件 select PACKAGE_sing-box。
+          #
+          # xray-core 同理，而且更隐蔽：它由 PassWall 的 INCLUDE_Xray 段里一句原生 Kconfig
+          #     select PACKAGE_xray-core
+          # 引入（该段定义在 luci-app-passwall/Makefile 的 define Package/.../config 里，
+          # 原样嵌进生成的 Kconfig）。Kconfig 的 select 优先级高于用户设置，
+          # 在 .config 里手写 CONFIG_PACKAGE_xray-core=n 会被 make defconfig 翻回 y。
+          # 所以要真正确保它不编译，唯一开关是 INCLUDE_Xray=n，这里再做一道闸。
           echo "===== 互斥校验（必须未启用）====="
           FORBIDDEN="
             CONFIG_PACKAGE_sing-box
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox
+            CONFIG_PACKAGE_xray-core
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray
           "
           for k in $FORBIDDEN; do
             if grep -q "^$k=y" .config; then
-              echo "  [FAIL] $k=y —— 会与 sing-box-tiny 冲突"; fail=1
+              echo "  [FAIL] $k=y —— 与既定精简目标冲突"; fail=1
             else
               echo "  [OK]   $k 未启用"
             fi
           done
 
-          echo "----- sing-box 变体实况 -----"
-          grep -E '^CONFIG_PACKAGE_sing-box|^# CONFIG_PACKAGE_sing-box' .config || echo "  (无)"
+          echo "----- 代理内核实况（应只见 sing-box-tiny，无 xray-core）-----"
+          grep -E '^CONFIG_PACKAGE_(sing-box|xray-core)|^# CONFIG_PACKAGE_(sing-box|xray-core)' .config || echo "  (无)"
 
           [ "$fail" -eq 0 ] || { echo "配置校验失败，终止编译"; exit 1; }
 
@@ -287,6 +296,22 @@ jobs:
         if: steps.compile.outputs.status == 'success'
         run: |
           ls -lh openwrt/bin/targets/${{ env.TARGET }}/
+          echo "----- feeds 包（bin/packages）-----"
+          echo "  apk 数量: $(find openwrt/bin/packages -name '*.apk' 2>/dev/null | wc -l)"
+          du -sh openwrt/bin/packages 2>/dev/null || true
+          echo "----- 代理核心终检：xray-core 必须缺席、sing-box 必须在 -----"
+          MAN=$(ls openwrt/bin/targets/${{ env.TARGET }}/*.manifest 2>/dev/null | head -1)
+          if [ -n "$MAN" ]; then
+            if grep -q '^xray-core ' "$MAN"; then
+              echo "  [FAIL] manifest 里出现 xray-core —— 与 INCLUDE_Xray=n 的预期不符"
+              exit 1
+            else
+              echo "  [OK]   manifest 里没有 xray-core"
+            fi
+            grep -E '^(sing-box|sing-box-tiny|luci-app-passwall|luci-app-homeproxy) ' "$MAN" || echo "  !! 未见 sing-box / passwall"
+          else
+            echo "  (未找到 manifest)"
+          fi
           echo "----- 分区/体积对照 -----"
           echo "AX3000T stock 布局：ubi_kernel 34MB / ubi 78MB（rootfs 落在这里）"
 
@@ -321,5 +346,10 @@ jobs:
             openwrt/bin/targets/${{ env.TARGET }}/*.tar.gz
             openwrt/bin/targets/${{ env.TARGET }}/*.manifest
             openwrt/bin/targets/${{ env.TARGET }}/packages/**
+            # ★ feeds 包在另一棵树里：bin/targets/.../packages 只放 target 自建包
+            # （kmod-* 之类，run #5 只有 117 个），而 luci-app-*、sing-box、
+            # passwall 系列、bind 等由 feeds 构建的 apk 全在 bin/packages/<arch>/<feed>/。
+            # 不加这一行，产物里就没有这些 apk，想在路由器上单独 apk add 会缺文件。
+            openwrt/bin/packages/**
           if-no-files-found: warn
           retention-days: 14
