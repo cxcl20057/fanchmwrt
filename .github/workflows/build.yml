@@ -487,9 +487,16 @@ jobs:
       # apk-selfrepo 正是按 `<...>/releases/download/pkgs-<run>-<name>/packages.adb`
       # 指向它们，tag 带 run 号 → 一一对应，不会串版本，也不会串签名密钥
       # （每次编译都会重新生成 private-key.pem，公钥随固件一起进 /etc/apk/keys/）。
-      # 只保留最近 3 次编译的源，更早的自动清理（每个约 50~200MB）。
+      # 只保留最近 5 次编译的源（KEEP_N），更早的自动清理（每个约 50~200MB）。
+      #
+      # ⚠️ continue-on-error 是必须的：本步骤在「上传固件」之前。GitHub Actions 里
+      # 某步失败后，后续 step 的条件会隐含 success() 而被跳过 —— 若这里硬失败
+      # （set -e 下 gh release create/upload 任一报错），下面 213MB 的固件产物就
+      # 一起废了，等于白编 4 小时。加了它之后：发布出问题"只"标这一格红，
+      # 固件照常上传；真正的把关交给最后一步「校验自建源可达性」（if: always()）。
       - name: 发布自建 apk 源（Release）
         if: steps.compile.outputs.status == 'success'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

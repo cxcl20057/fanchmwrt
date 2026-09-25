@@ -192,6 +192,8 @@ code, r = call("POST", f"/repos/{OWNER}/{REPO}/git/commits", {
                "  发成 pkgs-<run>-* Release；保留最近 5 次，旧的自动清理。\n"
                "  注意本固件未开 CONFIG_BUILDBOT，不存在 bin/targets/<t>/kmods/。\n"
                "- 新增最后一步「校验自建源可达性」：匿名拉取 8 条 URL，任一非 200 即标红。\n"
+               "- 「发布自建 apk 源」加 continue-on-error：它在「上传固件」之前，硬失败会因\n"
+               "  隐含 success() 把 213MB 固件产物一起跳过；改为只标红该步，把关交给最后一步。\n"
                "- 上传 glob 补 *.ubi / *.itb / *.tar.gz / bin/packages/**；\n"
                "  日志 artifact 打开 include-hidden-files（否则 .config 不会被收集）。\n"
                "\n"
