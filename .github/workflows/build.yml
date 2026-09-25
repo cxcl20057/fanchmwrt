@@ -19,6 +19,13 @@ on:
       - 'diy-part1.sh'
       - 'scripts/**'
 
+# 一次推送多个文件会产生多个 commit，进而拉起多个并发编译。
+# 加并发锁：同一分支只保留最新一次运行，新提交自动取消旧运行，
+# 避免 N 份全量 OpenWrt 编译互相抢占 runner 与 dl 缓存。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REPO_URL: https://github.com/fanchmwrt/fanchmwrt
   REPO_BRANCH: fanchmwrt-25.12.4
