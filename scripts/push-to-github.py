@@ -178,13 +178,34 @@ if code not in (200, 201):
 tree_sha = r["sha"]
 
 code, r = call("POST", f"/repos/{OWNER}/{REPO}/git/commits", {
-    "message": "feat: sing-box 换 tiny 变体 + 加入 luci-app-pushbot / bind-host\n\n"
+    "message": "feat: 自建 apk 源（让固件能随便装源里的软件）+ 去 xray-core + sing-box-tiny\n\n"
                "编译器：fanchmwrt-25.12.4 / mediatek-filogic / xiaomi_mi-router-ax3000t (stock)\n"
-               "- sing-box → sing-box-tiny（PROVIDES:=sing-box，CONFLICTS:=sing-box）\n"
-               "  同时关掉 PassWall 的 INCLUDE_SingBox（无条件 select PACKAGE_sing-box）\n"
-               "- 新增 luci-app-pushbot（克隆到 package/，根目录即包目录不能当 feed）\n"
-               "- 新增 bind-host（官方 packages feed 的 net/bind 子包）\n"
-               "- 校验步骤增加互斥检查：CONFIG_PACKAGE_sing-box 必须未启用",
+               "\n"
+               "【自建 apk 源】\n"
+               "- 修正 distfeeds.list：只保留官方 7 条源。原版 FeedSourcesAppendAPK 会把\n"
+               "  passwall_luci / passwall_packages / luci_app_easytier / immortalwrt_luci /\n"
+               "  immortalwrt_packages 这 5 个第三方 feed 也写成 downloads.openwrt.org 上的路径，\n"
+               "  而官方站只有 7 个目录 → apk update 必然报错。\n"
+               "- 新增 apk-selfrepo 包（编译时生成）：把本次编译发布的 8 条自建源写进固件。\n"
+               "- 新增「发布自建 apk 源」步骤：把 bin/packages/<arch>/* 与\n"
+               "  bin/targets/<t>/packages（kmod-* 与 kernel/base-files/libc 等 nonshared 包）\n"
+               "  发成 pkgs-<run>-* Release；保留最近 5 次，旧的自动清理。\n"
+               "  注意本固件未开 CONFIG_BUILDBOT，不存在 bin/targets/<t>/kmods/。\n"
+               "- 新增最后一步「校验自建源可达性」：匿名拉取 8 条 URL，任一非 200 即标红。\n"
+               "- 上传 glob 补 *.ubi / *.itb / *.tar.gz / bin/packages/**；\n"
+               "  日志 artifact 打开 include-hidden-files（否则 .config 不会被收集）。\n"
+               "\n"
+               "【精简】\n"
+               "- sing-box → sing-box-tiny（PROVIDES:=sing-box，CONFLICTS:=sing-box），\n"
+               "  同时关掉 PassWall 的无条件 select：INCLUDE_SingBox=n。\n"
+               "- 去掉 xray-core（省 10.75 MB）：唯一开关是 INCLUDE_Xray=n，\n"
+               "  因为 select PACKAGE_xray-core 是原生 Kconfig select，手写 =n 会被 defconfig 翻回。\n"
+               "- 新增 luci-app-pushbot（克隆到 package/，根目录即包目录不能当 feed）。\n"
+               "- 新增 bind-host（官方 packages feed 的 net/bind 子包）。\n"
+               "\n"
+               "【校验】\n"
+               "- REQUIRED 增加 apk-selfrepo / openwrt-keyring 等；\n"
+               "- FORBIDDEN 增加 sing-box full / xray-core 及其 INCLUDE_* 开关。",
     "tree": tree_sha,
     "parents": [head_sha],
 })

@@ -26,6 +26,7 @@
 | `xray-core`（**刻意不编译**） | OpenWrt 官方 feed `net/xray-core` | 从 `.config` **排除** | 它不在 PassWall 的 `LUCI_DEPENDS` 里，只由 `INCLUDE_Xray` 段里一句原生 Kconfig `select PACKAGE_xray-core` 引入 —— 该 select 优先级高于用户设置，只能在这个开关处关掉。PassWall 改用 sing-box 核心（运行时探测、且 sing-box 优先） |
 | `bind-host` | **OpenWrt 官方 feed** `net/bind` | 直接 `.config` 勾选 | `net/bind` 拆出的最小子包，提供 `/usr/bin/host`；`bind-libs` 由依赖带入 |
 | `luci-app-pushbot` | zzsj0928/luci-app-pushbot `master` | **克隆进 `package/`** 当本地包（非 feed） | 仓库是「根目录即包目录」结构，Makefile 在仓库根，**当不了 feed**；纯 ucode，要求 LuCI ≥ 23.05 |
+| `apk-selfrepo`（**自建 apk 源清单**） | 编译时由 workflow 现生成到 `package/apk-selfrepo/` | 本地包，不在 `.git` 里 | 只做一件事：往 `/etc/apk/repositories.d/` 放 `99-selfrepo.list`，把「本次编译发布的 8 个源」写进固件。详见**第九节** |
 
 > 你原话提到「immortalwrt 25.12.2 里有以上插件」——核实结果：**immortalwrt 25.12.2
 > 的包仓库确实是 `.apk` 格式（aarch64_cortex-a53）**，上述插件在里面全部存在。
@@ -56,12 +57,17 @@ config/ax3000t-stock.config             增量配置（目标设备 + 插件清�
 3. 稀疏拉取 immortalwrt 扩展包 → `$WORKSPACE/immortalwrt-src/{luci,packages}`
 4. `diy-part1.sh` 追加 feed
 5. **克隆 `luci-app-pushbot` 到 `package/`**（本地包，非 feed）
-6. `feeds update -a`
-7. **官方 feed 逐个 `install -a`** + **第三方 feed 白名单 install**
-8. 去重保险：删掉第三方与官方重名的软链
-9. 可选套用 `feeds_patches/luci`
-10. `make defconfig` + **关键包校验（缺一个就 fail）+ 互斥校验（sing-box full / xray-core 均不得为 y）**
-11. `make download` → `make -j` → 上传 artifact
+6. **生成 `apk-selfrepo` 包**（把本次编译要发布的 8 条自建源写进固件）
+7. `feeds update -a`
+8. **官方 feed 逐个 `install -a`** + **第三方 feed 白名单 install**
+9. 去重保险：删掉第三方与官方重名的软链
+10. 可选套用 `feeds_patches/luci`
+11. **修正 `distfeeds.list` 为显式 7 条官方源**（去掉必然 404 的第三方 feed 行）
+12. `make defconfig` + **关键包校验（缺一个就 fail）+ 互斥校验（sing-box full / xray-core 均不得为 y）**
+13. `make download` → `make -j`
+14. **发布自建 apk 源**：把 `bin/packages/<arch>/*` 与 `bin/targets/<t>/packages` 发成 `pkgs-<run>-*` Release，并清理旧 run
+15. 上传日志与固件 artifact
+16. **校验 8 条自建源可达**（匿名拉取，任一非 200 就标红）
 
 ---
 
@@ -163,6 +169,9 @@ AX3000T stock 布局（来自 `target/linux/mediatek/dts/mt7981b-xiaomi-mi-route
 | `feeds install` 阶段报 `No feed for package 'xxx'` | 依赖名与预期不符（上游改了包名） | 到日志里搜该包名，在 `diy-part1.sh` 后单独补一条白名单安装 |
 | 编译到一半 OOM | `-j5` 在 16GB runner 上跑满 | 把 `make -j$(( $(nproc) + 1 ))` 改成 `make -j2` |
 | 打不开 `luci-app-rtp2httpd` 页面但装上了 | 只装了 LuCI 没装守护进程 | 配置里已同时勾了 `rtp2httpd`，校验步骤会拦；若手动改动请一并保留 |
+| 刷完后 `apk update` 报某条源取不到（`Not Found` / `temporary error`） | 原版 fanchmwrt 用 `FeedSourcesAppendAPK` 把 **所有** feed 都写成 `downloads.openwrt.org/.../<feed>/packages.adb`，其中 `passwall_luci`、`passwall_packages`、`luci_app_easytier`、`immortalwrt_luci`、`immortalwrt_packages` 这 5 个第三方 feed 在官方下载站上**根本不存在**（它只发布 7 个目录），必然 404 | 本方案已修：`distfeeds.list` 只保留官方 7 条；第三方 feed / 本地包 / kmod 改由**本次编译自己发布成 Release** 并由 `apk-selfrepo` 预置。见第九节 |
+| 装 kmod 报 `cannot satisfy dependency` / vermagic 不符 | 内核 vermagic 与官方不同（本固件 `6.12.87~f6c834707c435c09f2147f1e1358ba32`，官方 `6.12.87-1-82967b4996cac5f682958cca092c9ab1`），官方源的 `kmod-*` 一个都装不上 | 用自建源（第九节）里的 kmod；**自建源只包含本次编译选中并编出来的那些 kmod**，没编的（如 `kmod-usb-net-rndis`）任何源都装不了，只能改 `.config` 重编 |
+| `apk add` 报 `UNTRUSTED signature` | 自建源用**每次编译新生成**的密钥签名，跨 run 混用必然验不过 | 只能用同一 run 的自建源（固件里已按 run 号固化）；不要手工把别的 run 的源加进来 |
 | 刷机后想回官方小米固件 | stock 布局未动 U-Boot | 直接走小米官方恢复流程即可 |
 
 ---
@@ -231,3 +240,78 @@ HomeProxy 走的是虚拟依赖 `+sing-box`，tiny 因为 `PROVIDES:=sing-box` �
 
 **不带 PassWall/HomeProxy 的精简固件**：把 `config` 里对应块设为 `=n` 即可，
 两个代理插件彼此独立，可以只留一个。
+
+---
+
+## 九、让固件能「随便装源里的软件」（apk 源机制）
+
+### 9.1 两层源
+
+| 层 | 谁生成 | 条数 | 内容 |
+|---|---|---|---|
+| **官方源** | `base-files` 的包安装脚本（本方案已改成显式 7 条） | 7 | 官方 25.12.4：`targets/<t>/packages` + `packages/<arch>/{base,packages,luci,routing,telephony,video}` |
+| **自建源** | 编译时现生成的 `apk-selfrepo` 包 + workflow 的「发布自建 apk 源」步骤 | 8 | 官方站上**没有**的那些：`kmod-*`、`nonshared` 包、本地包、第三方 feed 包 |
+
+落到固件里的两个文件：
+
+- `/etc/apk/repositories.d/distfeeds.list` —— 官方源
+- `/etc/apk/repositories.d/99-selfrepo.list` —— 自建源（`apk-selfrepo` 包安装）
+
+### 9.2 为什么必须有自建源（三条源码级事实）
+
+1. **官方站只有 7 个目录**。`targets/<board>/<subtarget>/packages` 与 `packages/<arch>/` 下的 `base packages luci routing telephony video`。第三方 feed 的 URL（如 `packages/<arch>/passwall_luci/packages.adb`）一律 404，而 `apk update` 遇到取不到的源会报错。原版 fanchmwrt 只 `sed -i '/fanchmwrt/d'` 掉了自己那一行，5 条第三方 feed 全留着。
+2. **`kmod-*` 强绑内核 vermagic**。本固件 `6.12.87~f6c834707c435c09f2147f1e1358ba32`，官方 `6.12.87-1-82967b4996cac5f682958cca092c9ab1` —— 官方源的 kmod 一个都装不上。
+3. **`nonshared` 包只在本树编得出来**。`include/package-dumpinfo.mk`：
+   ```makefile
+   $(if $(filter nonshared,$(PKGFLAGS)),,Repository: $(if $(FEED),$(FEED),base))
+   ```
+   `PKGFLAGS` 含 `nonshared` 时**不写** `Repository:` → 该包没有 `subdir` → `FeedPackageDir`（`include/feeds.mk`）回落到 `$(PACKAGE_DIR)`，即 `bin/targets/<board>/<subtarget>/packages`（`rules.mk:180`：`PACKAGE_DIR?=$(BIN_DIR)/packages`）。**`kmod-*` 与 `kernel` / `base-files` / `libc` 都在这个目录里。**
+
+> ⚠️ 本固件**不存在** `bin/targets/<t>/kmods/`。那个目录是 `CONFIG_BUILDBOT` 专属 —— `include/feeds.mk` 里
+> `$(if $(CONFIG_BUILDBOT), echo '%U/targets/%S/kmods/$(LINUX_VERSION)-$(LINUX_RELEASE)-$(LINUX_VERMAGIC)/packages.adb';)`
+> 我们没开 buildbot，所以 kmod 与其它 nonshared 包同处 `targets/<t>/packages`。把源写成 `.../kmods/packages.adb` 会 404。
+
+### 9.3 8 条自建源
+
+URL 形式：`https://github.com/<owner>/<repo>/releases/download/pkgs-<run>-<name>/packages.adb`
+
+| Release tag | 对应源目录 | 里面是什么 |
+|---|---|---|
+| `pkgs-<run>-target` | `bin/targets/<board>/<subtarget>/packages/` | `kmod-*`（约 100 个）+ `kernel`、`base-files`、`libc`、`libgcc1`、`mtd`、`ubi-utils`、`uboot-envtools`、`fstools`、`dropbear` 等 |
+| `pkgs-<run>-base` | `bin/packages/<arch>/base/` | 本地包（`apk-selfrepo` 自身、`luci-app-pushbot`、`fwxd`、`libfwx_common`）+ core 树里非 nonshared 的包 |
+| `pkgs-<run>-fanchmwrt` | `bin/packages/<arch>/fanchmwrt/` | fanchmwrt-packages feed：`luci-app-fwx-*` ×17 + `luci-i18n-fwx-*-zh-cn` ×17 |
+| `pkgs-<run>-passwall_luci` | `bin/packages/<arch>/passwall_luci/` | `luci-app-passwall` |
+| `pkgs-<run>-passwall_packages` | `bin/packages/<arch>/passwall_packages/` | `geoview`、`ipt2socks`、`simple-obfs`、`v2ray-plugin`、`shadowsocks-rust`、`shadowsocksr-libev` |
+| `pkgs-<run>-luci_app_easytier` | `bin/packages/<arch>/luci_app_easytier/` | `luci-app-easytier`、`easytier` |
+| `pkgs-<run>-immortalwrt_luci` | `bin/packages/<arch>/immortalwrt_luci/` | `luci-app-vlmcsd`、`luci-app-rtp2httpd`、`luci-app-homeproxy` |
+| `pkgs-<run>-immortalwrt_packages` | `bin/packages/<arch>/immortalwrt_packages/` | `vlmcsd`、`rtp2httpd` |
+
+（`luci` / `packages` / `routing` / `telephony` / `video` 这 5 个官方 feed **不需要**自建：`feeds.buildinfo` 与本仓库 `feeds.conf.default` 的 5 个 pin 逐字相同，版本天然对齐，直接用官方源即可。）
+
+### 9.4 签名 —— 所以不需要 `--allow-untrusted`
+
+| 环节 | 事实 |
+|---|---|
+| 索引签名 | 本配置 `CONFIG_SIGNED_PACKAGES=y`；`package/Makefile` 生成时带 `--sign $(BUILD_KEY_APK_SEC)`，**`packages.adb` 自带签名** |
+| 密钥来源 | `rules.mk`：`BUILD_KEY_APK_SEC=$(TOPDIR)/private-key.pem`、`BUILD_KEY_APK_PUB=$(TOPDIR)/public-key.pem`；workflow 不缓存它们 ⇒ **每次编译换一把钥匙** |
+| 固件信任 | 非 buildbot 构建时 `base-files/install-key` 把 `public-key.pem` 装进 `/etc/apk/keys/`（apk 分支） |
+| 结论 | 同一 run 的固件 ⇄ 自建源互信，`apk add` 不用加 `--allow-untrusted`；**跨 run 混用必然报 `UNTRUSTED signature`** |
+
+### 9.5 维护与限制
+
+- 每次编译自动发布，**保留最近 5 次 run**（`KEEP_N=5`），更早的 Release 自动删除。每个 run 的包约 60~70 MB。
+- ⇒ **旧固件的自建源会被清掉**（URL 里带 run 号）。要长期保留就把「清理旧源」整段注释掉。
+- 编译结束有一步「**校验自建源可达性**」：逐条**匿名**拉取 8 个 URL，任一非 200 就把这次运行标红 —— 避免出现「固件刷好了、源却是 404」。
+- 「显示产物」步骤会打印 `bin/packages/<arch>/*/` 各目录的 apk 数与索引状态，以及 `bin/targets/<t>/packages/` 的 kmod 数，用来确认每条源都真有内容。
+
+### 9.6 在路由器上验证
+
+```sh
+cat /etc/apk/repositories.d/distfeeds.list    # 应恰好 7 条，全是 downloads.openwrt.org
+cat /etc/apk/repositories.d/99-selfrepo.list  # 8 条 + 注释，指向本仓库 pkgs-<run>-*
+apk update                                    # 不应出现任何 Not Found / temporary error
+apk search pushbot                            # 能搜到自建源里的包
+apk add --simulate luci-app-fwx-dashboard     # 预演安装
+```
+
+首次使用建议先 `apk update` 拉一次索引。

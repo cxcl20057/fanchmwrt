@@ -32,13 +32,44 @@ env:
   CONFIG_FILE: config/ax3000t-stock.config
   IMM_SRC: immortalwrt-src
   TARGET: mediatek/filogic
+  ARCH_PKG: aarch64_cortex-a53
   TZ: Asia/Shanghai
+  # ------------------------------------------------------------------
+  # 「自建 apk 源」要发布的目录。
+  #
+  # 官方站 releases/25.12.4 只发布这 7 个目录：
+  #   targets/<board>/<subtarget>/packages/packages.adb
+  #   packages/<arch>/{base,packages,luci,routing,telephony,video}/packages.adb
+  # 其余目录官方站上没有，固件里照抄它们就会 404（原版 fanchmwrt 把
+  # passwall_luci / passwall_packages / luci_app_easytier / immortalwrt_luci /
+  # immortalwrt_packages 这 5 条第三方 feed 原样写进 distfeeds.list，`apk update`
+  # 必然报错）—— 所以这些包必须由本次编译自己发布，源 URL 里带 run 号，
+  # 「这一次编译的固件」只认「这一次编译发布的包」，版本与签名天然一致。
+  #
+  # SELF_FEEDS  —— 位于 bin/packages/<arch>/<feed>/ 的目录
+  #   base：所有「无 FEED 且非 nonshared」的包。apk-selfrepo 自己、
+  #         luci-app-pushbot、fwxd 等本地包都落在这里，必须发布，
+  #         否则自建源自身就没法从网上补装。
+  #   fanchmwrt / passwall_* / luci_app_easytier / immortalwrt_*：第三方 feed 包。
+  #
+  # SELF_TARGET —— bin/targets/<board>/<subtarget>/packages/
+  #   依据 include/package-dumpinfo.mk：`PKGFLAGS` 含 nonshared 的包不写
+  #   `Repository:` → 没有 subdir → 落回 PACKAGE_DIR（= BIN_DIR/packages，
+  #   见 rules.mk:180），也就是 target 目录。kmod-* 与 kernel / base-files /
+  #   libc 全在这里。
+  #   ⚠️ 本固件没开 CONFIG_BUILDBOT，所以 **不存在** bin/targets/<t>/kmods/
+  #      （官方的 kmods/ 是 buildbot 专属，见 include/feeds.mk 里
+  #       `$(if $(CONFIG_BUILDBOT), echo .../kmods/...)`）。写 kmods 会 404。
+  # ------------------------------------------------------------------
+  SELF_FEEDS: base fanchmwrt passwall_luci passwall_packages luci_app_easytier immortalwrt_luci immortalwrt_packages
+  SELF_TARGET: target
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     permissions:
-      contents: read
+      # 发布自建 apk 源要往本仓库建 Release，因此需要写权限（原来是只读）
+      contents: write
 
     steps:
       - name: 检出本仓库（含 diy 脚本与配置）
@@ -116,6 +147,75 @@ jobs:
             || { echo "!! pushbot/Makefile 的 luci.mk include 路径变了，需人工确认"; exit 1; }
           echo "pushbot 版本：$(grep -E '^PKG_VERSION' package/luci-app-pushbot/Makefile)"
           ls package/luci-app-pushbot
+
+      # ---------------------------------------------------------------
+      # 生成「自建 apk 源清单」包（apk-selfrepo，编译时生成，不在 .git 里）
+      #
+      # 背景：官方 downloads.openwrt.org/releases/25.12.4 只发布 7 个目录
+      #   targets/<t>/packages + packages/<arch>/{base,packages,luci,routing,telephony,video}
+      # 而固件需要但官方站上没有的包有三类：
+      #   · kmod-*                 —— 内核 vermagic 不同（我们 6.12.87~f6c83470…，
+      #                               官方 6.12.87-1-82967b49…），官方 kmod 一律装不上
+      #   · 本地包与第三方 feed 包 —— pushbot、apk-selfrepo、passwall 系列、
+      #                               easytier、fwx 系列、vlmcsd/rtp2httpd 等
+      #   · kernel / base-files / libc 等 nonshared 包 —— 只在本树编得出来
+      # 所以由本次编译把它们发布到本仓库的 Release（见下面「发布自建 apk 源」步骤），
+      # 固件的 99-selfrepo.list 指向带 run 号的 tag。
+      # ---------------------------------------------------------------
+      - name: 生成自建源清单包（apk-selfrepo）
+        run: |
+          set -e
+          python3 - <<'PY'
+          import io, os
+          run  = os.environ["GITHUB_RUN_NUMBER"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          feeds = os.environ["SELF_FEEDS"].split()
+
+          pkg = "openwrt/package/apk-selfrepo"
+          os.makedirs(pkg + "/files/etc/apk/repositories.d", exist_ok=True)
+
+          mk = (
+              "include $(TOPDIR)/rules.mk\n\n"
+              "PKG_NAME:=apk-selfrepo\n"
+              "PKG_VERSION:=1.0\n"
+              "PKG_RELEASE:=1\n"
+              "PKG_LICENSE:=MIT\n\n"
+              "include $(INCLUDE_DIR)/package.mk\n\n"
+              "define Package/apk-selfrepo\n"
+              "  SECTION:=base\n"
+              "  CATEGORY:=Base system\n"
+              "  TITLE:=本次编译自建 apk 源清单 (self-hosted apk repos)\n"
+              "  PKGARCH:=all\n"
+              "  DEPENDS:=+apk-mbedtls\n"
+              "endef\n\n"
+              "define Package/apk-selfrepo/install\n"
+              "\t$(INSTALL_DIR) $(1)/etc/apk/repositories.d\n"
+              "\t$(INSTALL_DATA) ./files/etc/apk/repositories.d/99-selfrepo.list $(1)/etc/apk/repositories.d/\n"
+              "endef\n\n"
+              "$(eval $(call BuildPackage,apk-selfrepo))\n"
+          )
+          io.open(pkg + "/Makefile", "w", encoding="utf-8").write(mk)
+
+          base = "https://github.com/%s/releases/download/pkgs-%s" % (repo, run)
+          lines = [
+              "# 本次编译（run %s）自建的 apk 源；编译时生成，不在 .git 里" % run,
+              "# 官方源见同目录 distfeeds.list —— 这里只放官方站上不存在的包",
+              "#（kmod-* 与 kernel/base-files/libc 等 nonshared 包、本地包、第三方 feed 包）",
+              "# 每个 tag 里的 packages.adb 都由本次编译的密钥签名，",
+              "# 对应公钥已由 base-files 装进 /etc/apk/keys/，无需 --allow-untrusted。",
+          ]
+          # SELF_TARGET 指向 bin/targets/<board>/<subtarget>/packages（kmods + nonshared 包）
+          for f in feeds + [os.environ["SELF_TARGET"]]:
+              lines.append("%s-%s/packages.adb" % (base, f))
+          io.open(pkg + "/files/etc/apk/repositories.d/99-selfrepo.list",
+                  "w", encoding="utf-8").write("\n".join(lines) + "\n")
+
+          print("----- 99-selfrepo.list -----")
+          print(io.open(pkg + "/files/etc/apk/repositories.d/99-selfrepo.list",
+                        encoding="utf-8").read())
+          print("----- apk-selfrepo/Makefile（前 6 行）-----")
+          print("".join(io.open(pkg + "/Makefile", encoding="utf-8").readlines()[:6]))
+          PY
 
       - name: 更新 feeds
         run: |
@@ -198,6 +298,60 @@ jobs:
           done < <(find feeds_patches/luci -name '*.patch' -o -name '*.diff' | sort)
           echo "共套用 $cnt 个补丁"
 
+      # ---------------------------------------------------------------
+      # 修正 distfeeds.list：只保留官方 7 个源
+      #
+      # base-files 生成 /etc/apk/repositories.d/distfeeds.list 时调用
+      # FeedSourcesAppendAPK，它把 feeds.conf 里**所有** feed 都写成
+      #   <VERSION_REPO>/packages/<arch>/<feed>/packages.adb
+      # 但官方下载站上只有 base/packages/luci/routing/telephony/video 六个
+      # packages feed 目录（外加 targets/<t>/packages）—— 第三方 git feed 的
+      # 路径必然 404，而 `apk update` 遇到取不到的源会直接报错。
+      # 原版 fanchmwrt 只 sed 掉了自己的 `fanchmwrt` 一行，第三方 feed 全留着。
+      # 这里改成显式列出官方源；第三方/本地包由 apk-selfrepo 指向自建 Release。
+      # ---------------------------------------------------------------
+      - name: 修正 distfeeds.list（只保留官方源）
+        run: |
+          set -e
+          cd openwrt
+          python3 - <<'PY'
+          import io
+          p = "package/base-files/Makefile"
+          s = io.open(p, encoding="utf-8").read()
+
+          OLD = (
+              "\tmkdir -p $(1)/etc/apk/repositories.d\n"
+              "\t$(call FeedSourcesAppendAPK,$(1)/etc/apk/repositories.d/distfeeds.list)\n"
+              "\tsed -i '/fanchmwrt/d' $(1)/etc/apk/repositories.d/distfeeds.list\n"
+          )
+          NEW = (
+              "\tmkdir -p $(1)/etc/apk/repositories.d\n"
+              "\t# 只写官方源：FeedSourcesAppendAPK 会把第三方 git feed 也写成\n"
+              "\t# downloads.openwrt.org/.../<feed>/packages.adb（官方站上没有这个目录，必然 404），\n"
+              "\t# 而 apk update 遇到取不到的源会报错。第三方/本地包改由 apk-selfrepo 指向自建源。\n"
+              "\t( \\\n"
+              "\t  echo '%U/targets/%S/packages/packages.adb'; \\\n"
+              "\t  echo '%U/packages/%A/base/packages.adb'; \\\n"
+              "\t  echo '%U/packages/%A/packages/packages.adb'; \\\n"
+              "\t  echo '%U/packages/%A/luci/packages.adb'; \\\n"
+              "\t  echo '%U/packages/%A/routing/packages.adb'; \\\n"
+              "\t  echo '%U/packages/%A/telephony/packages.adb'; \\\n"
+              "\t  echo '%U/packages/%A/video/packages.adb'; \\\n"
+              "\t) > $(1)/etc/apk/repositories.d/distfeeds.list\n"
+          )
+          assert OLD in s, "base-files/Makefile 的 distfeeds 生成段与预期不符，需人工核对"
+          io.open(p, "w", encoding="utf-8").write(s.replace(OLD, NEW))
+          print("已打补丁：distfeeds.list 只保留官方源")
+          PY
+
+          # 断言：FeedSourcesAppendAPK 调用必须消失，且 7 条源都在
+          if grep -q 'FeedSourcesAppendAPK' package/base-files/Makefile; then
+            echo "!! 补丁没生效：仍有 FeedSourcesAppendAPK 调用"; exit 1
+          fi
+          n=$(grep -c "packages.adb';" package/base-files/Makefile)
+          echo "  distfeeds 官方源条目数：$n（应为 7）"
+          [ "$n" -eq 7 ] || { echo "!! 条目数不对，终止"; exit 1; }
+
       - name: 载入配置并生成完整 .config
         run: |
           set -e
@@ -232,6 +386,8 @@ jobs:
             CONFIG_PACKAGE_bind-host
             CONFIG_PACKAGE_luci-app-pushbot
             CONFIG_PACKAGE_luci-i18n-pushbot-zh-cn
+            CONFIG_PACKAGE_apk-selfrepo
+            CONFIG_PACKAGE_openwrt-keyring
           "
           fail=0
           for k in $REQUIRED; do
@@ -314,6 +470,78 @@ jobs:
           fi
           echo "----- 分区/体积对照 -----"
           echo "AX3000T stock 布局：ubi_kernel 34MB / ubi 78MB（rootfs 落在这里）"
+          echo "----- 自建源目录实况（决定「发布自建 apk 源」会产出哪些 tag）-----"
+          echo "[bin/packages/${ARCH_PKG}/]"
+          for d in openwrt/bin/packages/${ARCH_PKG}/*/; do
+            [ -d "$d" ] || continue
+            apks=$(ls "$d" 2>/dev/null | grep -c '\.apk$')
+            idx=$([ -f "$d/packages.adb" ] && echo 有 || echo 无)
+            echo "  $(basename "$d")   apk=${apks}   packages.adb=${idx}"
+          done
+          echo "[bin/targets/${TARGET}/packages]（kmod-* 与 nonshared 包）"
+          td="openwrt/bin/targets/${TARGET}/packages"
+          echo "  apk=$(ls "$td" 2>/dev/null | grep -c '\.apk$')   kmod=$(ls "$td" 2>/dev/null | grep -c '^kmod-')   packages.adb=$([ -f "$td/packages.adb" ] && echo 有 || echo 无)"
+          echo "  （本固件未开 CONFIG_BUILDBOT，故没有 kmods/ 目录，kmod 就在上面这个目录里）"
+
+      # 把本次编译的包发布成本仓库的 Release（每个目录一个 Release）。固件里的
+      # apk-selfrepo 正是按 `<...>/releases/download/pkgs-<run>-<name>/packages.adb`
+      # 指向它们，tag 带 run 号 → 一一对应，不会串版本，也不会串签名密钥
+      # （每次编译都会重新生成 private-key.pem，公钥随固件一起进 /etc/apk/keys/）。
+      # 只保留最近 3 次编译的源，更早的自动清理（每个约 50~200MB）。
+      - name: 发布自建 apk 源（Release）
+        if: steps.compile.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          RUN=${{ github.run_number }}
+          missing=""
+
+          publish() {   # $1=源名  $2=目录
+            dir="$2"
+            if [ ! -d "$dir" ]; then echo "  [缺失] $1：$dir 不存在"; missing="$missing $1"; return 0; fi
+            n=$(find "$dir" -maxdepth 1 -type f \( -name '*.apk' -o -name 'packages.adb' \) | wc -l)
+            if [ "$n" -eq 0 ]; then echo "  [空]   $1：目录里没有 apk"; missing="$missing $1"; return 0; fi
+            if [ ! -f "$dir/packages.adb" ]; then
+              echo "  [缺索引] $1：$dir 没有 packages.adb"; missing="$missing $1"; return 0
+            fi
+            tag="pkgs-${RUN}-$1"
+            gh release delete "$tag" --yes --cleanup-tag >/dev/null 2>&1 || true
+            gh release create "$tag" --title "$tag" \
+              --notes "run ${RUN} 自动生成：$1 的 packages.adb + $((n-1)) 个 apk。固件 pkgs-${RUN} 专用，请勿手动增删。" >/dev/null
+            find "$dir" -maxdepth 1 -type f \( -name '*.apk' -o -name 'packages.adb' \) -print0 \
+              | xargs -0 -n 30 gh release upload "$tag" --clobber
+            echo "  [OK]   $tag ← ${n} 个文件"
+          }
+
+          # ① target：kmod-* + kernel/base-files/libc 等 nonshared 包
+          publish "$SELF_TARGET" "openwrt/bin/targets/${TARGET}/packages"
+          # ② bin/packages/<arch>/ 下各 feed 与本地包
+          for f in $SELF_FEEDS; do
+            publish "$f" "openwrt/bin/packages/${ARCH_PKG}/${f}"
+          done
+
+          echo "----- 清理旧源（保留最近 5 次编译）-----"
+          # ⚠️ 旧固件的 selfrepo URL 里带 run 号，一旦这些 Release 被清掉，
+          # 旧固件上的 `apk update` 就会报源取不到。所以保留次数不能太小；
+          # 想永久保留就整段注释掉（每个 run 的包约 60~70MB）。
+          KEEP_N=5
+          ALL=$(gh release list --limit 300 --json tagName --jq '.[].tagName' 2>/dev/null \
+                | grep '^pkgs-' || true)
+          KEEP=$(echo "$ALL" | sed -E 's/^pkgs-([0-9]+)-.*/\1/' | sort -n -u | tail -"$KEEP_N" | tr '\n' ' ')
+          echo "  保留 run：$KEEP"
+          echo "$ALL" | while read -r t; do
+            [ -n "$t" ] || continue
+            r=$(echo "$t" | sed -E 's/^pkgs-([0-9]+)-.*/\1/')
+            case " $KEEP " in
+              *" $r "*) ;;
+              *) echo "  清理：$t"; gh release delete "$t" --yes --cleanup-tag >/dev/null 2>&1 || true ;;
+            esac
+          done
+
+          echo "----- 当前 pkgs-* Release -----"
+          gh release list --limit 40 | grep '^pkgs-' || true
+          if [ -n "$missing" ]; then echo "!! 以下源没有发布成：$missing"; fi
 
       - name: SSH 调试（失败时可选）
         if: (failure() || cancelled()) && inputs.ssh == 'true'
@@ -353,3 +581,33 @@ jobs:
             openwrt/bin/packages/**
           if-no-files-found: warn
           retention-days: 14
+
+      # 固件里的 99-selfrepo.list 把 URL 写死了，任一 404 就是「装不上源里的软件」。
+      # 因此编译结束后必须逐条验一遍。
+      # 刻意放在【最后一步】并带 always()：
+      #   · GitHub Actions 里某步失败后，后续步骤的条件默认隐含 success()，会被跳过；
+      #     放最后才能保证即使这里红了，上面的固件与日志产物都已经上传完成。
+      - name: 校验自建源可达性
+        if: always()
+        run: |
+          RUN=${{ github.run_number }}
+          echo "----- 逐条验证 pkgs-${RUN}-* 的 packages.adb -----"
+          bad=0
+          tot=0
+          for f in $SELF_FEEDS $SELF_TARGET; do
+            tot=$((tot+1))
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/download/pkgs-${RUN}-${f}/packages.adb"
+            # 匿名拉取（不带头），复现路由器上的真实访问方式
+            code=$(curl -sL -o /dev/null -w '%{http_code}' --retry 2 --max-time 30 "$url" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "  [OK]   $url"
+            else
+              echo "  [FAIL] $url → HTTP $code （固件里这条源会报错）"
+              bad=$((bad+1))
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "!! 有 $bad/$tot 条自建源取不到。请看「发布自建 apk 源」步骤里的 [缺失]/[空]/[缺索引] 提示。"
+            exit 1
+          fi
+          echo "全部 $tot 条自建源均可达（固件的 apk update 不会因源 404 报错）。"
