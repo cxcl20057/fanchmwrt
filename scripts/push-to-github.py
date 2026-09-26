@@ -178,36 +178,7 @@ if code not in (200, 201):
 tree_sha = r["sha"]
 
 code, r = call("POST", f"/repos/{OWNER}/{REPO}/git/commits", {
-    "message": "feat: 自建 apk 源（让固件能随便装源里的软件）+ 去 xray-core + sing-box-tiny\n\n"
-               "编译器：fanchmwrt-25.12.4 / mediatek-filogic / xiaomi_mi-router-ax3000t (stock)\n"
-               "\n"
-               "【自建 apk 源】\n"
-               "- 修正 distfeeds.list：只保留官方 7 条源。原版 FeedSourcesAppendAPK 会把\n"
-               "  passwall_luci / passwall_packages / luci_app_easytier / immortalwrt_luci /\n"
-               "  immortalwrt_packages 这 5 个第三方 feed 也写成 downloads.openwrt.org 上的路径，\n"
-               "  而官方站只有 7 个目录 → apk update 必然报错。\n"
-               "- 新增 apk-selfrepo 包（编译时生成）：把本次编译发布的 8 条自建源写进固件。\n"
-               "- 新增「发布自建 apk 源」步骤：把 bin/packages/<arch>/* 与\n"
-               "  bin/targets/<t>/packages（kmod-* 与 kernel/base-files/libc 等 nonshared 包）\n"
-               "  发成 pkgs-<run>-* Release；保留最近 5 次，旧的自动清理。\n"
-               "  注意本固件未开 CONFIG_BUILDBOT，不存在 bin/targets/<t>/kmods/。\n"
-               "- 新增最后一步「校验自建源可达性」：匿名拉取 8 条 URL，任一非 200 即标红。\n"
-               "- 「发布自建 apk 源」加 continue-on-error：它在「上传固件」之前，硬失败会因\n"
-               "  隐含 success() 把 213MB 固件产物一起跳过；改为只标红该步，把关交给最后一步。\n"
-               "- 上传 glob 补 *.ubi / *.itb / *.tar.gz / bin/packages/**；\n"
-               "  日志 artifact 打开 include-hidden-files（否则 .config 不会被收集）。\n"
-               "\n"
-               "【精简】\n"
-               "- sing-box → sing-box-tiny（PROVIDES:=sing-box，CONFLICTS:=sing-box），\n"
-               "  同时关掉 PassWall 的无条件 select：INCLUDE_SingBox=n。\n"
-               "- 去掉 xray-core（省 10.75 MB）：唯一开关是 INCLUDE_Xray=n，\n"
-               "  因为 select PACKAGE_xray-core 是原生 Kconfig select，手写 =n 会被 defconfig 翻回。\n"
-               "- 新增 luci-app-pushbot（克隆到 package/，根目录即包目录不能当 feed）。\n"
-               "- 新增 bind-host（官方 packages feed 的 net/bind 子包）。\n"
-               "\n"
-               "【校验】\n"
-               "- REQUIRED 增加 apk-selfrepo / openwrt-keyring 等；\n"
-               "- FORBIDDEN 增加 sing-box full / xray-core 及其 INCLUDE_* 开关。",
+    "message": "feat: 回到 run #7 结构 + 三项修改（geoview 取消 / HomeProxy 默认 DNS / distfeeds 镜像源）\n\n编译器：fanchmwrt-25.12.4 / mediatek-filogic / xiaomi_mi-router-ax3000t (stock)\n基线：commit 0c5d1a4c（= run #7；实测该版固件装第三方源的软件正常）\n\n【1) geoview 加入取消列表】\n- config：INCLUDE_Geoview 由 y 改 n；依赖段改写为 `# CONFIG_PACKAGE_geoview is not set`；\n  另立一段「取消列表」，与 sing-box full / xray-core 并列。\n- 原因：INCLUDE_Geoview 段是原生 Kconfig `select PACKAGE_geoview`，select 优先级高于\n  .config 里的手写值，只写 `# CONFIG_PACKAGE_geoview is not set` 会被 make defconfig 翻回 y。\n- workflow：REQUIRED 移除 CONFIG_PACKAGE_geoview；「互斥校验」更名「取消列表校验」并加入\n  geoview / INCLUDE_Geoview；「显示产物」新增 manifest 不得出现 geoview 的终检。\n- 省 4–6 MB；需要时 `apk add geoview` 从源里补装。\n\n【2) HomeProxy 出厂 DNS 列表】\n- 新步骤「注入 HomeProxy 默认 DNS 条目」：往 luci-app-homeproxy 的出厂配置\n  root/etc/config/homeproxy 追加一条 config dns_server\n  （label / enabled=1 / type=udp / server=2a01:4f8:c2c:123f::1）。\n- 该表对应面板「DNS → DNS 服务器」，上游出厂值本来是空表。\n- 说明：该表只在 routing_mode=custom 时参与 sing-box 生成（generate_client.uc 里\n  uci.foreach(...dns_server...) 位于 main_node 为空的分支）；默认 bypass_mainland_china\n  下实际解析仍用 config homeproxy 'config'.dns_server（8.8.8.8）。\n\n【3) distfeeds.list 改为固定 7 条镜像源】\n- 新步骤「写入自定义 distfeeds.list（镜像源）」：把 base-files/Makefile 里\n  「FeedSourcesAppendAPK + sed + VERSION_SED_SCRIPT」三行整体换成 printf 固定内容。\n- 为什么必须改 Makefile：FeedSourcesAppendAPK 用 `>` 重定向写盘，构建时必然覆盖静态文件。\n- 7 条：vsean（302 → mirror.nju.edu.cn 的 immortalwrt）× 6 + pku kmods × 1；\n  2026-09-26 逐条 curl 实测全部可达。\n- ⚠️ 镜像 kmods 是内核 6.12.103-1-b5b7729f，本固件是 6.12.87~f6c83470（fanchmwrt-25.12.4），\n  vermagic 不同 → kmod-* 装不上；纯用户态包不受影响。\n\n【撤掉自建 apk 源】\n- 删除「生成自建源清单包（apk-selfrepo）」「发布自建 apk 源（Release）」\n  「校验自建源可达性」三个步骤，以及 SELF_FEEDS / SELF_TARGET / ARCH_PKG 与 contents:write。\n- 固件里 /etc/apk/repositories.d/ 从此只剩 distfeeds.list，不再有 99-selfrepo.list。\n\n【保留（与 run #7 完全一致）】\n- sing-box-tiny（INCLUDE_SingBox=n）、去 xray-core（INCLUDE_Xray=n）、\n  luci-app-pushbot（克隆到 package/）、bind-host。\n",
     "tree": tree_sha,
     "parents": [head_sha],
 })

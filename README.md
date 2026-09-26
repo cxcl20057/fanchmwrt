@@ -24,9 +24,9 @@
 | `openssh-sftp-server` | **核心源码树** `package/network/services/openssh` | 直接 `.config` 勾选 | 无需任何 feed |
 | `sing-box-tiny`（**替换** `sing-box` full 版） | **OpenWrt 官方 feed** `net/sing-box` | 直接 `.config` 勾选 | 同一个 Makefile 产出 `sing-box`(full, `DEFAULT_VARIANT`) 与 `sing-box-tiny`；tiny 带 `PROVIDES:=sing-box` + `CONFLICTS:=sing-box`，装的是同一个 `/usr/bin/sing-box`，可顶替 |
 | `xray-core`（**刻意不编译**） | OpenWrt 官方 feed `net/xray-core` | 从 `.config` **排除** | 它不在 PassWall 的 `LUCI_DEPENDS` 里，只由 `INCLUDE_Xray` 段里一句原生 Kconfig `select PACKAGE_xray-core` 引入 —— 该 select 优先级高于用户设置，只能在这个开关处关掉。PassWall 改用 sing-box 核心（运行时探测、且 sing-box 优先） |
+| `geoview`（**刻意不编译**） | Openwrt-Passwall/openwrt-passwall-packages `main` | 从 `.config` **排除** | 同一套路：PassWall 的 `INCLUDE_Geoview` 段是原生 Kconfig `select PACKAGE_geoview`，光写 `# CONFIG_PACKAGE_geoview is not set` 会被 `make defconfig` 翻回 y，必须把 `INCLUDE_Geoview` 设成 `n`。体积 4–6 MB（含 GeoIP 数据），需要时再从源里 `apk add geoview` |
 | `bind-host` | **OpenWrt 官方 feed** `net/bind` | 直接 `.config` 勾选 | `net/bind` 拆出的最小子包，提供 `/usr/bin/host`；`bind-libs` 由依赖带入 |
 | `luci-app-pushbot` | zzsj0928/luci-app-pushbot `master` | **克隆进 `package/`** 当本地包（非 feed） | 仓库是「根目录即包目录」结构，Makefile 在仓库根，**当不了 feed**；纯 ucode，要求 LuCI ≥ 23.05 |
-| `apk-selfrepo`（**自建 apk 源清单**） | 编译时由 workflow 现生成到 `package/apk-selfrepo/` | 本地包，不在 `.git` 里 | 只做一件事：往 `/etc/apk/repositories.d/` 放 `99-selfrepo.list`，把「本次编译发布的 8 个源」写进固件。详见**第九节** |
 
 > 你原话提到「immortalwrt 25.12.2 里有以上插件」——核实结果：**immortalwrt 25.12.2
 > 的包仓库确实是 `.apk` 格式（aarch64_cortex-a53）**，上述插件在里面全部存在。
@@ -57,17 +57,15 @@ config/ax3000t-stock.config             增量配置（目标设备 + 插件清�
 3. 稀疏拉取 immortalwrt 扩展包 → `$WORKSPACE/immortalwrt-src/{luci,packages}`
 4. `diy-part1.sh` 追加 feed
 5. **克隆 `luci-app-pushbot` 到 `package/`**（本地包，非 feed）
-6. **生成 `apk-selfrepo` 包**（把本次编译要发布的 8 条自建源写进固件）
-7. `feeds update -a`
-8. **官方 feed 逐个 `install -a`** + **第三方 feed 白名单 install**
-9. 去重保险：删掉第三方与官方重名的软链
-10. 可选套用 `feeds_patches/luci`
-11. **修正 `distfeeds.list` 为显式 7 条官方源**（去掉必然 404 的第三方 feed 行）
-12. `make defconfig` + **关键包校验（缺一个就 fail）+ 互斥校验（sing-box full / xray-core 均不得为 y）**
+6. `feeds update -a`
+7. **官方 feed 逐个 `install -a`** + **第三方 feed 白名单 install**
+8. 去重保险：删掉第三方与官方重名的软链
+9. 可选套用 `feeds_patches/luci`
+10. **写入自定义 `distfeeds.list`**（把 `base-files` 的生成段整体换成 7 条镜像源）
+11. **注入 HomeProxy 出厂 DNS 条目**（`config dns_server`）
+12. `make defconfig` + **关键包校验（缺一个就 fail）+ 取消列表校验（sing-box full / xray-core / geoview 均不得为 y）**
 13. `make download` → `make -j`
-14. **发布自建 apk 源**：把 `bin/packages/<arch>/*` 与 `bin/targets/<t>/packages` 发成 `pkgs-<run>-*` Release，并清理旧 run
-15. 上传日志与固件 artifact
-16. **校验 8 条自建源可达**（匿名拉取，任一非 200 就标红）
+14. 上传日志与固件 artifact
 
 ---
 
@@ -96,7 +94,7 @@ git add -A && git commit -m "add AX3000T build pipeline" && git push
 
 `openwrt-passwall-packages` 里同时包含 `xray-core`、`sing-box`、`microsocks`。
 把官方 feed 放前面，`passwall` 需要的这些包就会取官方版本；
-只有官方没有的（`chinadns-ng`、`dns2socks`、`tcping`、`geoview`…）才回落到 passwall 包源。
+只有官方没有的（`chinadns-ng`、`dns2socks`、`tcping`、`ipt2socks`…）才回落到 passwall 包源。
 
 ### 2. 为什么**不能**对第三方 feed 用 `feeds install -a`？
 
@@ -134,7 +132,7 @@ AX3000T stock 布局（来自 `target/linux/mediatek/dts/mt7981b-xiaomi-mi-route
 |---|---|
 | ~~`xray-core`~~ | **不编译** —— 本可占 **10.75 MB**，现已省下 |
 | `sing-box-tiny`（passwall 与 homeproxy 共用） | **13.62 MB**（full 版 **18.09 MB**，换 tiny 只回收 **4.47 MB**，并非早前估的 10 MB） |
-| `geoview` + 数据 | 4–6 MB |
+| ~~`geoview` + 数据~~ | **不编译** —— 本可占 **4–6 MB**，已按 `INCLUDE_Geoview=n` 关掉（需要时 `apk add geoview`） |
 | `shadowsocks-rust` + `shadowsocksr-libev` + `simple-obfs` + `v2ray-plugin` | 6–8 MB |
 | `haproxy` | **1.69 MB** |
 | `easytier`（含 web 控制台） | 10–15 MB |
@@ -143,14 +141,15 @@ AX3000T stock 布局（来自 `target/linux/mediatek/dts/mt7981b-xiaomi-mi-route
 | `luci-app-pushbot`（`jq`/`curl`/`iputils-arping` 依赖另计） | < 1 MB（纯脚本） |
 | LuCI + 中文语言包 | 8–10 MB |
 
-参照：run #5（含 `xray-core` + sing-box **full**）的 `sysupgrade.bin` = **55.85 MB**。
-本轮「去 xray + 换 tiny」两笔合计预计回收 **约 15 MB**，产出落在 **41–43 MB** 区间。
+参照：run #5（含 `xray-core` + sing-box **full**）的 `sysupgrade.bin` = **55.85 MB**；
+run #7（去 xray + 换 tiny）的 artifact 共 **212.93 MB**（含全量 apk 与附属物，非单个刷机包）。
+本轮再关掉 geoview，按上表另可回收 **4–6 MB**。
 
 若刷完仍觉紧张，优先关这几项（改 `config/ax3000t-stock.config` 后重跑）：
 
 - `CONFIG_EASYTIER_INCLUDE_WEBCONSOLE=n`（easytier-web 是最大头）
-- `CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview=n`
 - `CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client=n`
+- `CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy=n`
 
 `v2ray-geodata` 默认已关闭（解包 25–30 MB）。
 
@@ -169,9 +168,9 @@ AX3000T stock 布局（来自 `target/linux/mediatek/dts/mt7981b-xiaomi-mi-route
 | `feeds install` 阶段报 `No feed for package 'xxx'` | 依赖名与预期不符（上游改了包名） | 到日志里搜该包名，在 `diy-part1.sh` 后单独补一条白名单安装 |
 | 编译到一半 OOM | `-j5` 在 16GB runner 上跑满 | 把 `make -j$(( $(nproc) + 1 ))` 改成 `make -j2` |
 | 打不开 `luci-app-rtp2httpd` 页面但装上了 | 只装了 LuCI 没装守护进程 | 配置里已同时勾了 `rtp2httpd`，校验步骤会拦；若手动改动请一并保留 |
-| 刷完后 `apk update` 报某条源取不到（`Not Found` / `temporary error`） | 原版 fanchmwrt 用 `FeedSourcesAppendAPK` 把 **所有** feed 都写成 `downloads.openwrt.org/.../<feed>/packages.adb`，其中 `passwall_luci`、`passwall_packages`、`luci_app_easytier`、`immortalwrt_luci`、`immortalwrt_packages` 这 5 个第三方 feed 在官方下载站上**根本不存在**（它只发布 7 个目录），必然 404 | 本方案已修：`distfeeds.list` 只保留官方 7 条；第三方 feed / 本地包 / kmod 改由**本次编译自己发布成 Release** 并由 `apk-selfrepo` 预置。见第九节 |
-| 装 kmod 报 `cannot satisfy dependency` / vermagic 不符 | 内核 vermagic 与官方不同（本固件 `6.12.87~f6c834707c435c09f2147f1e1358ba32`，官方 `6.12.87-1-82967b4996cac5f682958cca092c9ab1`），官方源的 `kmod-*` 一个都装不上 | 用自建源（第九节）里的 kmod；**自建源只包含本次编译选中并编出来的那些 kmod**，没编的（如 `kmod-usb-net-rndis`）任何源都装不了，只能改 `.config` 重编 |
-| `apk add` 报 `UNTRUSTED signature` | 自建源用**每次编译新生成**的密钥签名，跨 run 混用必然验不过 | 只能用同一 run 的自建源（固件里已按 run 号固化）；不要手工把别的 run 的源加进来 |
+| 刷完后 `apk update` 报某条源取不到（`Not Found` / `temporary error`） | 原版 fanchmwrt 用 `FeedSourcesAppendAPK` 把 **所有** feed 都写成 `downloads.openwrt.org/.../<feed>/packages.adb`，其中 `passwall_luci`、`passwall_packages`、`luci_app_easytier`、`immortalwrt_luci`、`immortalwrt_packages` 这 5 个第三方 feed 在官方下载站上**根本不存在**（它只发布 7 个目录），必然 404 | 本方案已修：把 `base-files/Makefile` 的生成段整体换成 `printf` 写死的 **7 条镜像源**。见第九节 |
+| 装 kmod 报 `cannot satisfy dependency` / vermagic 不符 | 镜像里的 kmods 目录是内核 `6.12.103-1-b5b7729ffbba3ecdd83f339de8fadfb8`，本固件是 `6.12.87~f6c834707c435c09f2147f1e1358ba32`（fanchmwrt-25.12.4），vermagic 不同 → `kmod-*` 一个都装不上 | 只能改 `.config` 重编（本方案已撤掉自建源，不再有配套的 kmod 渠道）；纯用户态包不受影响 |
+| `apk add` 报 `UNTRUSTED signature` | 镜像索引的签名钥匙与本固件自带的钥匙（`/etc/apk/keys/`）不一定匹配 | 先试 `apk update`；若报不信任，加 `--allow-untrusted`（run #7 实机已装成过这套镜像，以实机结果为准） |
 | 刷机后想回官方小米固件 | stock 布局未动 U-Boot | 直接走小米官方恢复流程即可 |
 
 ---
@@ -231,8 +230,9 @@ HomeProxy 走的是虚拟依赖 `+sing-box`，tiny 因为 `PROVIDES:=sing-box` �
   其余 vmess / vless / trojan / ss / tuic / hysteria2 / REALITY 由 sing-box 承载，不受影响。
 - **加回来**：把该行改回 `y`（会连带装回 `xray-core` 10.75 MB），其余配置不用动。
 - 流水线的确认手段：互斥校验把 `CONFIG_PACKAGE_xray-core`、
-  `CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray` 列为**必须未启用**；
-  编译完成后「显示产物」还会 grep 固件 manifest，出现 `xray-core` 就直接 fail。
+  `CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray`、`CONFIG_PACKAGE_geoview`、
+  `CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview` 列为**必须未启用**（workflow 里叫「取消列表」）；
+  编译完成后「显示产物」还会 grep 固件 manifest，出现 `xray-core` 或 `geoview` 就直接 fail。
 
 **切成大分区（OpenWrt U-Boot 布局）**：把 `config/ax3000t-stock.config` 里设备名改成
 `xiaomi_mi-router-ax3000t-ubootmod`，并把 `CONFIG_TARGET_..._DEVICE_xiaomi_mi-router-ax3000t`
@@ -243,75 +243,79 @@ HomeProxy 走的是虚拟依赖 `+sing-box`，tiny 因为 `PROVIDES:=sing-box` �
 
 ---
 
-## 九、让固件能「随便装源里的软件」（apk 源机制）
+## 九、apk 源：固件里的 `distfeeds.list` 是写死的 7 条镜像源
 
-### 9.1 两层源
+> 说明：早前试过「自建 apk 源」（`apk-selfrepo` 包 + 每次编译发布 `pkgs-<run>-*` Release），实测不如直接用公开镜像省事 —— **已撤掉**，固件里不再有 `99-selfrepo.list`。
 
-| 层 | 谁生成 | 条数 | 内容 |
-|---|---|---|---|
-| **官方源** | `base-files` 的包安装脚本（本方案已改成显式 7 条） | 7 | 官方 25.12.4：`targets/<t>/packages` + `packages/<arch>/{base,packages,luci,routing,telephony,video}` |
-| **自建源** | 编译时现生成的 `apk-selfrepo` 包 + workflow 的「发布自建 apk 源」步骤 | 8 | 官方站上**没有**的那些：`kmod-*`、`nonshared` 包、本地包、第三方 feed 包 |
+### 9.1 为什么要改这一步
 
-落到固件里的两个文件：
+原版 fanchmwrt 的 `base-files/Makefile` 用 `$(call FeedSourcesAppendAPK,...)` 给**每个 feed 各写一行**：
 
-- `/etc/apk/repositories.d/distfeeds.list` —— 官方源
-- `/etc/apk/repositories.d/99-selfrepo.list` —— 自建源（`apk-selfrepo` 包安装）
+官方 7 条（`targets/<t>/packages` + `packages/<arch>/{base,packages,luci,routing,telephony,video}`）
+加**第三方 5 条**（`passwall_luci` / `passwall_packages` / `luci_app_easytier` / `immortalwrt_luci` / `immortalwrt_packages`）。
 
-### 9.2 为什么必须有自建源（三条源码级事实）
+后 5 条在官方下载站上根本不存在，`apk update` 必然报错。所以 workflow 里加了一步「**写入自定义 distfeeds.list（镜像源）**」，把那三行（生成 + `sed` + `VERSION_SED_SCRIPT`）整体换成 `printf` 写死的固定内容。
 
-1. **官方站只有 7 个目录**。`targets/<board>/<subtarget>/packages` 与 `packages/<arch>/` 下的 `base packages luci routing telephony video`。第三方 feed 的 URL（如 `packages/<arch>/passwall_luci/packages.adb`）一律 404，而 `apk update` 遇到取不到的源会报错。原版 fanchmwrt 只 `sed -i '/fanchmwrt/d'` 掉了自己那一行，5 条第三方 feed 全留着。
-2. **`kmod-*` 强绑内核 vermagic**。本固件 `6.12.87~f6c834707c435c09f2147f1e1358ba32`，官方 `6.12.87-1-82967b4996cac5f682958cca092c9ab1` —— 官方源的 kmod 一个都装不上。
-3. **`nonshared` 包只在本树编得出来**。`include/package-dumpinfo.mk`：
-   ```makefile
-   $(if $(filter nonshared,$(PKGFLAGS)),,Repository: $(if $(FEED),$(FEED),base))
-   ```
-   `PKGFLAGS` 含 `nonshared` 时**不写** `Repository:` → 该包没有 `subdir` → `FeedPackageDir`（`include/feeds.mk`）回落到 `$(PACKAGE_DIR)`，即 `bin/targets/<board>/<subtarget>/packages`（`rules.mk:180`：`PACKAGE_DIR?=$(BIN_DIR)/packages`）。**`kmod-*` 与 `kernel` / `base-files` / `libc` 都在这个目录里。**
+> ⚠️ 为什么不能只往 `package/base-files/files/etc/apk/repositories.d/` 里放个同名文件：
+> `FeedSourcesAppendAPK` 是用 `>` 重定向写盘的，构建时必然把静态文件覆盖掉。所以只能改 Makefile（`package/base-files/Makefile` 第 254 行附近）。
 
-> ⚠️ 本固件**不存在** `bin/targets/<t>/kmods/`。那个目录是 `CONFIG_BUILDBOT` 专属 —— `include/feeds.mk` 里
-> `$(if $(CONFIG_BUILDBOT), echo '%U/targets/%S/kmods/$(LINUX_VERSION)-$(LINUX_RELEASE)-$(LINUX_VERMAGIC)/packages.adb';)`
-> 我们没开 buildbot，所以 kmod 与其它 nonshared 包同处 `targets/<t>/packages`。把源写成 `.../kmods/packages.adb` 会 404。
+### 9.2 固定的 7 条（实测可达，2026-09-26 逐条 `curl` 验过）
 
-### 9.3 8 条自建源
-
-URL 形式：`https://github.com/<owner>/<repo>/releases/download/pkgs-<run>-<name>/packages.adb`
-
-| Release tag | 对应源目录 | 里面是什么 |
-|---|---|---|
-| `pkgs-<run>-target` | `bin/targets/<board>/<subtarget>/packages/` | `kmod-*`（约 100 个）+ `kernel`、`base-files`、`libc`、`libgcc1`、`mtd`、`ubi-utils`、`uboot-envtools`、`fstools`、`dropbear` 等 |
-| `pkgs-<run>-base` | `bin/packages/<arch>/base/` | 本地包（`apk-selfrepo` 自身、`luci-app-pushbot`、`fwxd`、`libfwx_common`）+ core 树里非 nonshared 的包 |
-| `pkgs-<run>-fanchmwrt` | `bin/packages/<arch>/fanchmwrt/` | fanchmwrt-packages feed：`luci-app-fwx-*` ×17 + `luci-i18n-fwx-*-zh-cn` ×17 |
-| `pkgs-<run>-passwall_luci` | `bin/packages/<arch>/passwall_luci/` | `luci-app-passwall` |
-| `pkgs-<run>-passwall_packages` | `bin/packages/<arch>/passwall_packages/` | `geoview`、`ipt2socks`、`simple-obfs`、`v2ray-plugin`、`shadowsocks-rust`、`shadowsocksr-libev` |
-| `pkgs-<run>-luci_app_easytier` | `bin/packages/<arch>/luci_app_easytier/` | `luci-app-easytier`、`easytier` |
-| `pkgs-<run>-immortalwrt_luci` | `bin/packages/<arch>/immortalwrt_luci/` | `luci-app-vlmcsd`、`luci-app-rtp2httpd`、`luci-app-homeproxy` |
-| `pkgs-<run>-immortalwrt_packages` | `bin/packages/<arch>/immortalwrt_packages/` | `vlmcsd`、`rtp2httpd` |
-
-（`luci` / `packages` / `routing` / `telephony` / `video` 这 5 个官方 feed **不需要**自建：`feeds.buildinfo` 与本仓库 `feeds.conf.default` 的 5 个 pin 逐字相同，版本天然对齐，直接用官方源即可。）
-
-### 9.4 签名 —— 所以不需要 `--allow-untrusted`
-
-| 环节 | 事实 |
+| 用途 | 地址 |
 |---|---|
-| 索引签名 | 本配置 `CONFIG_SIGNED_PACKAGES=y`；`package/Makefile` 生成时带 `--sign $(BUILD_KEY_APK_SEC)`，**`packages.adb` 自带签名** |
-| 密钥来源 | `rules.mk`：`BUILD_KEY_APK_SEC=$(TOPDIR)/private-key.pem`、`BUILD_KEY_APK_PUB=$(TOPDIR)/public-key.pem`；workflow 不缓存它们 ⇒ **每次编译换一把钥匙** |
-| 固件信任 | 非 buildbot 构建时 `base-files/install-key` 把 `public-key.pem` 装进 `/etc/apk/keys/`（apk 分支） |
-| 结论 | 同一 run 的固件 ⇄ 自建源互信，`apk add` 不用加 `--allow-untrusted`；**跨 run 混用必然报 `UNTRUSTED signature`** |
+| target 包 | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/targets/mediatek/filogic/packages/packages.adb` |
+| base | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/base/packages.adb` |
+| kmods | `https://mirrors.pku.edu.cn/immortalwrt/releases/25.12-SNAPSHOT/targets/mediatek/filogic/kmods/6.12.103-1-b5b7729ffbba3ecdd83f339de8fadfb8//packages.adb` |
+| luci | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/luci/packages.adb` |
+| packages | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/packages/packages.adb` |
+| routing | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/routing/packages.adb` |
+| telephony | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/telephony/packages.adb` |
 
-### 9.5 维护与限制
+实测详情：
 
-- 每次编译自动发布，**保留最近 5 次 run**（`KEEP_N=5`），更早的 Release 自动删除。每个 run 的包约 60~70 MB。
-- ⇒ **旧固件的自建源会被清掉**（URL 里带 run 号）。要长期保留就把「清理旧源」整段注释掉。
-- 编译结束有一步「**校验自建源可达性**」：逐条**匿名**拉取 8 个 URL，任一非 200 就把这次运行标红 —— 避免出现「固件刷好了、源却是 404」。
-- 「显示产物」步骤会打印 `bin/packages/<arch>/*/` 各目录的 apk 数与索引状态，以及 `bin/targets/<t>/packages/` 的 kmod 数，用来确认每条源都真有内容。
+- vsean 那 6 条返回 **302**，`Location` 指向 `mirror.nju.edu.cn/immortalwrt/...`，跟随跳转后 **200**；
+- pku 那条 kmods 直连 **200**，URL 里 `kmods/<kver>//packages.adb` 的双斜杠由服务端归一，不影响；
+- 镜像里的 kmods 是内核 **6.12.103-1** 的，本固件是 **6.12.87~f6c83470...**（fanchmwrt-25.12.4），所以 **`kmod-*` 装不上**；纯用户态包不受影响。
 
-### 9.6 在路由器上验证
+### 9.3 在路由器上验证
 
 ```sh
-cat /etc/apk/repositories.d/distfeeds.list    # 应恰好 7 条，全是 downloads.openwrt.org
-cat /etc/apk/repositories.d/99-selfrepo.list  # 8 条 + 注释，指向本仓库 pkgs-<run>-*
-apk update                                    # 不应出现任何 Not Found / temporary error
-apk search pushbot                            # 能搜到自建源里的包
-apk add --simulate luci-app-fwx-dashboard     # 预演安装
+cat /etc/apk/repositories.d/distfeeds.list   # 应恰好 7 条，全部是上面那两个镜像
+ls  /etc/apk/repositories.d/                 # 应只有 distfeeds.list（自建源方案已撤，无 99-selfrepo.list）
+apk update
+apk search luci-app-geoview                  # geoview 已从固件里取消，需要时自己装
+apk add luci-app-geoview geoview
 ```
 
-首次使用建议先 `apk update` 拉一次索引。
+若 `apk update` 报 `UNTRUSTED signature`，说明镜像索引的签名钥匙与本固件自带的钥匙不匹配，加 `--allow-untrusted` 即可。
+
+---
+
+## 十、HomeProxy 出厂 DNS 列表
+
+`luci-app-homeproxy`（ImmortalWrt，`openwrt-25.12` 分支）的 `/etc/config/homeproxy` 就是随包发布的出厂配置。面板「**DNS → DNS 服务器**」那张表对应 uci 的 `config dns_server` 段，字段来自 `htdocs/luci-static/resources/view/homeproxy/client.js` 里的 `GridSection`：
+
+| 字段 | 说明 |
+|---|---|
+| `label` | 列表里显示的名字 |
+| `enabled` | 是否启用 |
+| `type` | `udp` / `tcp` / `tls` / `https` / `h3` / `quic` |
+| `server` | 服务器地址（IPv4 / IPv6 / 域名） |
+| `server_port` | 端口，留空按协议默认 |
+| `path` / `headers` | 仅 DoH / DoH3 用 |
+| `tls_sni` | 仅 TLS / HTTPS / H3 / QUIC 用 |
+| `address_resolver` | 地址里含域名时，用哪个 DNS 去解析它 |
+
+workflow 的「**注入 HomeProxy 默认 DNS 条目**」步骤往上游出厂配置尾部追加一条：
+
+```
+config dns_server
+    option label "2a01:4f8:c2c:123f::1"
+    option enabled "1"
+    option type "udp"
+    option server "2a01:4f8:c2c:123f::1"
+```
+
+上游出厂配置里这张表本来是**空的**，所以刷完机进面板就能看到这一条。
+
+> ⚠️ **生效范围**：`config dns_server` 只在 `routing_mode = custom` 时参与 sing-box 配置生成 —— `root/etc/homeproxy/scripts/generate_client.uc` 里那段 `uci.foreach(uciconfig, ucidnsserver, ...)` 位于 `main_node` 为空的 `else if` 分支。默认的 `bypass_mainland_china` 模式下，实际解析用的是 `config homeproxy 'config'` 里的 `dns_server`（出厂值 `8.8.8.8`）与 `china_dns_server`（`223.5.5.5`）。也就是说：**这条只是「列表里有」，要在面板里选中它（或切到 custom 路由模式）才会真正用上。**
