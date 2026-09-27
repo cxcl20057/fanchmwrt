@@ -5,8 +5,8 @@ push-to-github.py —— 一次性把本套编译文件推到 GitHub 并触发 A
 
 设计要点：用 Git Data API 走【单次原子提交】（blob → tree → commit → 更新 ref），
 而不是逐个文件调 PUT /contents。原因：PUT /contents 每个文件产生一个 commit，
-而工作流 `on.push.paths` 命中 build.yml / config / diy / scripts 任一即触发，
-结果一次推送会拉起 N 份并发全量编译、互相抢占 runner。
+而多个 commit 可能多次命中 build.yml 的 push.paths，拉起 N 份并发全量编译、
+互相抢占 runner。
 
 用到的 REST API：
   1. POST  /user/repos                                  建仓（auto_init 先生成 main）
@@ -46,12 +46,17 @@ BRANCH = "main"
 
 FILES = [
     ".github/workflows/build.yml",
+    ".github/workflows/build-passwall-mini.yml",
     "config/ax3000t-stock.config",
+    "config/ax3000t-passwall-mini.config",
     "diy-part1.sh",
     "scripts/prepare-immortalwrt-feeds.sh",
     "scripts/push-to-github.py",
     "README.md",
 ]
+
+# 推送完成后手动触发哪个 workflow（mini 版无 push 触发，必须 dispatch）
+DISPATCH_WORKFLOW = "build-passwall-mini.yml"
 
 TOKEN = (os.environ.get("GHPAT") or os.environ.get("GITHUB_TOKEN") or "").strip()
 if not TOKEN:
@@ -178,7 +183,7 @@ if code not in (200, 201):
 tree_sha = r["sha"]
 
 code, r = call("POST", f"/repos/{OWNER}/{REPO}/git/commits", {
-    "message": "feat: 回到 run #7 结构 + 三项修改（geoview 取消 / HomeProxy 默认 DNS / distfeeds 镜像源）\n\n编译器：fanchmwrt-25.12.4 / mediatek-filogic / xiaomi_mi-router-ax3000t (stock)\n基线：commit 0c5d1a4c（= run #7；实测该版固件装第三方源的软件正常）\n\n【1) geoview 加入取消列表】\n- config：INCLUDE_Geoview 由 y 改 n；依赖段改写为 `# CONFIG_PACKAGE_geoview is not set`；\n  另立一段「取消列表」，与 sing-box full / xray-core 并列。\n- 原因：INCLUDE_Geoview 段是原生 Kconfig `select PACKAGE_geoview`，select 优先级高于\n  .config 里的手写值，只写 `# CONFIG_PACKAGE_geoview is not set` 会被 make defconfig 翻回 y。\n- workflow：REQUIRED 移除 CONFIG_PACKAGE_geoview；「互斥校验」更名「取消列表校验」并加入\n  geoview / INCLUDE_Geoview；「显示产物」新增 manifest 不得出现 geoview 的终检。\n- 省 4–6 MB；需要时 `apk add geoview` 从源里补装。\n\n【2) HomeProxy 出厂 DNS 列表】\n- 新步骤「注入 HomeProxy 默认 DNS 条目」：往 luci-app-homeproxy 的出厂配置\n  root/etc/config/homeproxy 追加一条 config dns_server\n  （label / enabled=1 / type=udp / server=2a01:4f8:c2c:123f::1）。\n- 该表对应面板「DNS → DNS 服务器」，上游出厂值本来是空表。\n- 说明：该表只在 routing_mode=custom 时参与 sing-box 生成（generate_client.uc 里\n  uci.foreach(...dns_server...) 位于 main_node 为空的分支）；默认 bypass_mainland_china\n  下实际解析仍用 config homeproxy 'config'.dns_server（8.8.8.8）。\n\n【3) distfeeds.list 改为固定 7 条镜像源】\n- 新步骤「写入自定义 distfeeds.list（镜像源）」：把 base-files/Makefile 里\n  「FeedSourcesAppendAPK + sed + VERSION_SED_SCRIPT」三行整体换成 printf 固定内容。\n- 为什么必须改 Makefile：FeedSourcesAppendAPK 用 `>` 重定向写盘，构建时必然覆盖静态文件。\n- 7 条：vsean（302 → mirror.nju.edu.cn 的 immortalwrt）× 6 + pku kmods × 1；\n  2026-09-26 逐条 curl 实测全部可达。\n- ⚠️ 镜像 kmods 是内核 6.12.103-1-b5b7729f，本固件是 6.12.87~f6c83470（fanchmwrt-25.12.4），\n  vermagic 不同 → kmod-* 装不上；纯用户态包不受影响。\n\n【撤掉自建 apk 源】\n- 删除「生成自建源清单包（apk-selfrepo）」「发布自建 apk 源（Release）」\n  「校验自建源可达性」三个步骤，以及 SELF_FEEDS / SELF_TARGET / ARCH_PKG 与 contents:write。\n- 固件里 /etc/apk/repositories.d/ 从此只剩 distfeeds.list，不再有 99-selfrepo.list。\n\n【保留（与 run #7 完全一致）】\n- sing-box-tiny（INCLUDE_SingBox=n）、去 xray-core（INCLUDE_Xray=n）、\n  luci-app-pushbot（克隆到 package/）、bind-host。\n",
+    "message": "feat: 新增 PassWall 精简版 workflow（仅 sing-box），收窄完整版触发路径\n\n编译器：fanchmwrt-25.12.4 / mediatek-filogic / xiaomi_mi-router-ax3000t (stock)\n基线：run #11 同一套完整版配置（本提交不改变完整版编译产物）\n\n【新增 build-passwall-mini.yml + config/ax3000t-passwall-mini.config】\n- PassWall 精简版：代理组件仅 sing-box-tiny + ipt2socks。\n- 砍除（INCLUDE_* 由 y 改 n，共 5 件）：shadowsocks-rust（sslocal）、\n  shadowsocksr-libev、simple-obfs、v2ray-plugin、haproxy。\n- 最大收益：不编 shadowsocks-rust → 不拖入 LLVM+rustc，预计省约 2 小时。\n- 副作用：SS/SSR 节点不可用，多节点负载均衡不可用。\n- 其余应用（HomeProxy/EasyTier/frps/vlmcsd/rtp2httpd/DDNS/pushbot/bind-host）全保留；\n  distfeeds 镜像源补丁与 HomeProxy DNS 注入与完整版一致。\n- 被砍源包仍装进 feeds（geoview/ipt2socks/simple-obfs/v2ray-plugin/\n  shadowsocks-rust/shadowsocksr-libev）：INCLUDE_* 段是原生 Kconfig select，\n  源包不在 feeds 时符号不存在、.config 里的 =n 会被 defconfig 静默丢行。\n  装进 feeds ≠ 编进固件，是否编译由 INCLUDE_*=n 决定。\n- 配置校验：REQUIRED 去掉被砍包；取消列表加入五件套及其 INCLUDE_*；\n  manifest 终检逐项断言五件套缺席 + sing-box/ipt2socks/passwall 在场。\n- 仅 workflow_dispatch 手动触发，无 push 触发。\n\n【build.yml 触发路径收窄】\n- push.paths 的 config/** 会命中 mini 配置文件 → 每次推 mini 配置都误触发全量编译。\n- 收窄为 config/ax3000t-stock.config；scripts/** 收窄为 prepare-immortalwrt-feeds.sh\n  （push-to-github.py 本身不参与编译结果，排除以免每次推送都拉起 4 小时编译）。\n- 完整版编译内容不变。\n",
     "tree": tree_sha,
     "parents": [head_sha],
 })
@@ -192,29 +197,26 @@ if code != 200:
     sys.exit(f"更新 ref 失败：{code} {r.get('message')}")
 print(f"    已推送 commit {commit_sha[:12]} → {BRANCH}")
 
-# ---------------------------------------------------------------- 5. 确认触发
-step(5, "确认编译已触发")
-time.sleep(10)
-code, runs = call("GET", f"/repos/{OWNER}/{REPO}/actions/runs?per_page=5")
-found = []
-if code == 200:
-    for run in runs.get("workflow_runs", []):
-        if run.get("head_sha") == commit_sha or run["status"] in ("in_progress", "queued"):
-            found.append(run)
-            print(f"    #{run['run_number']} {run['name']} | {run['status']} | {run['html_url']}")
+# ---------------------------------------------------------------- 5. 触发编译
+# mini 版 workflow 没有 push 触发，完整版的 push 路径也已收窄到不命中本次改动，
+# 所以推送本身不会拉起任何编译 —— 这里主动 dispatch 目标 workflow。
+step(5, f"手动触发 {DISPATCH_WORKFLOW}")
+time.sleep(8)
+dispatched = False
+for i in range(5):
+    code, r = call("POST",
+                   f"/repos/{OWNER}/{REPO}/actions/workflows/{DISPATCH_WORKFLOW}/dispatches",
+                   {"ref": BRANCH})
+    if code in (200, 204):
+        print("    已提交 workflow_dispatch")
+        dispatched = True
+        break
+    # 仓库刚推送新 workflow 文件时 GitHub 可能还没索引到，稍等再试
+    print(f"    第 {i+1} 次 dispatch 失败（{code} {r.get('message')}），12 秒后重试")
+    time.sleep(12)
 
-if not found:
-    print("    未检测到运行，尝试 workflow_dispatch 兜底…")
-    for i in range(5):
-        code, r = call("POST",
-                       f"/repos/{OWNER}/{REPO}/actions/workflows/build.yml/dispatches",
-                       {"ref": BRANCH})
-        if code in (200, 204):
-            print("    已提交 workflow_dispatch")
-            break
-        # 仓库刚建时 GitHub 可能还没索引到 workflow，稍等再试
-        print(f"    第 {i+1} 次 dispatch 失败（{code} {r.get('message')}），12 秒后重试")
-        time.sleep(12)
+if not dispatched:
+    print("    ⚠️ dispatch 未成功 —— 请到 Actions 页面手动 Run workflow")
 
 # ---------------------------------------------------------------- 6. 汇总
 step(6, "汇总")
@@ -226,4 +228,4 @@ for f, why in failed:
     print(f"    ✗ {f} —— {why}")
 if failed:
     sys.exit(2)
-print("\n完成。已并入单次提交，只会触发 1 次编译，通常 1.5~2.5 小时。")
+print("\n完成。已并入单次提交；mini 版编译已手动触发（无 push 自动触发），预计比完整版快约 2 小时。")

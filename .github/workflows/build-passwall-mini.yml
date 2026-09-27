@@ -1,4 +1,12 @@
-name: 编译 fanchmwrt (Xiaomi AX3000T · stock)
+name: 编译 fanchmwrt (Xiaomi AX3000T · PassWall 精简版 · 仅 sing-box)
+
+# ★ 与 build.yml（完整版）的差异：
+#   1. 配置用 config/ax3000t-passwall-mini.config：PassWall 只带 sing-box-tiny + ipt2socks，
+#      砍 shadowsocks-rust / shadowsocksr-libev / simple-obfs / v2ray-plugin / haproxy。
+#      （不再编 rust → 不拖入 LLVM + rustc，预计比完整版快约 2 小时。）
+#   2. 仅 workflow_dispatch 手动触发，无 push 触发（避免与完整版互相拉起编译）。
+#   3. 取消列表校验与 manifest 终检覆盖全部被砍组件。
+#   其余步骤（distfeeds 镜像源 / HomeProxy DNS 注入 / 其他应用）与完整版完全一致。
 
 on:
   workflow_dispatch:
@@ -11,21 +19,7 @@ on:
         description: '是否套用 fanchmwrt 对 luci feed 的补丁 (true/false)'
         required: false
         default: 'true'
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/build.yml'
-      # ★ 只盯完整版自己的文件，不能用 config/**：
-      #   那会把 config/ax3000t-passwall-mini.config（精简版）的改动也拉起一次全量编译。
-      - 'config/ax3000t-stock.config'
-      - 'diy-part1.sh'
-      # push-to-github.py 本身不参与编译结果，排除在外，
-      # 避免每次用脚本推送都触发一次 4 小时的全量编译。
-      - 'scripts/prepare-immortalwrt-feeds.sh'
 
-# 一次推送多个文件会产生多个 commit，进而拉起多个并发编译。
-# 加并发锁：同一分支只保留最新一次运行，新提交自动取消旧运行，
-# 避免 N 份全量 OpenWrt 编译互相抢占 runner 与 dl 缓存。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -33,7 +27,7 @@ concurrency:
 env:
   REPO_URL: https://github.com/fanchmwrt/fanchmwrt
   REPO_BRANCH: fanchmwrt-25.12.4
-  CONFIG_FILE: config/ax3000t-stock.config
+  CONFIG_FILE: config/ax3000t-passwall-mini.config
   IMM_SRC: immortalwrt-src
   TARGET: mediatek/filogic
   TZ: Asia/Shanghai
@@ -111,9 +105,6 @@ jobs:
 
           test -f package/luci-app-pushbot/Makefile \
             || { echo "!! pushbot/Makefile 不存在，克隆异常"; exit 1; }
-          # scan.mk 用 `grep -aHE 'call (Build/DefaultTargets|BuildPackage|KernelPackage)'`
-          # 发现包；该 Makefile 末尾那行 `# call BuildPackage - OpenWrt buildroot signature`
-          # 注释正是为此存在。这里前置断言，避免扫不到后静默漏包。
           grep -qE 'call (Build/DefaultTargets|BuildPackage|KernelPackage)' package/luci-app-pushbot/Makefile \
             || { echo "!! pushbot/Makefile 缺 BuildPackage 标记，scan.mk 会扫不到"; exit 1; }
           grep -q 'feeds/luci/luci.mk' package/luci-app-pushbot/Makefile \
@@ -125,7 +116,6 @@ jobs:
         run: |
           cd openwrt
           ./scripts/feeds update -a
-          # 删掉各 feed 的 .git 和 .github 省空间（后续编译不再需要）
           find feeds -mindepth 2 -maxdepth 2 -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
           find feeds -mindepth 2 -maxdepth 2 -name '.github' -type d -exec rm -rf {} + 2>/dev/null || true
 
@@ -145,14 +135,13 @@ jobs:
           echo "===== 2) 第三方 feed 白名单安装 ====="
           ./scripts/feeds install -p passwall_luci      luci-app-passwall
 
-          # ★ PassWall 的可选组件不在 LUCI_DEPENDS 里，只由 Kconfig 的 select 引用：
-          #     LUCI_DEPENDS 只含 chinadns-ng / dns2socks / tcping / microsocks 等固定项，
-          #     而 geoview / ipt2socks / simple-obfs / v2ray-plugin / shadowsocks-rust /
-          #     shadowsocksr-libev 全是 `select PACKAGE_xxx`。
-          #   feeds install 不会递归带上这些 → 源包不在 package/feeds/ 时 PACKAGE_xxx
-          #   符号根本不存在，select 静默空转，config 里的 INCLUDE_* 就成了空设置。
-          #   （实测：run #5 就是因此丢了 geoview 和 ipt2socks）
-          #   → 必须显式安装源包。此处仅"装入 feeds"，是否编译由 .config 决定。
+          # ★ 精简版仍要装全部 PassWall 组件源包（包括被砍的那些）：
+          #   INCLUDE_* 段是 luci-app-passwall/Makefile 里的原生 Kconfig select，
+          #   对应源包不在 package/feeds/ 时 PACKAGE_xxx 符号根本不存在，
+          #   .config 里的 INCLUDE_*=n 会被 make defconfig 静默丢行，
+          #   配置校验就失去断言能力（「被砍」变成「未定义」）。
+          #   装进 feeds ≠ 编进固件：是否编译由 .config 的 INCLUDE_*=n 决定。
+          #   （shadowsocks-rust 装而不编 —— 省下的 2h 来自不编译它本身。）
           ./scripts/feeds install -p passwall_packages  \
             geoview ipt2socks simple-obfs v2ray-plugin shadowsocks-rust shadowsocksr-libev
 
@@ -204,19 +193,8 @@ jobs:
 
       # ---------------------------------------------------------------
       # 把 base-files 生成的 distfeeds.list 换成「自选镜像源」固定 7 条
-      #
-      # 为什么不能只往 package/base-files/files/etc/apk/repositories.d/ 里放个同名文件：
-      #   base-files/Makefile 的 install 段会执行
-      #       $(call FeedSourcesAppendAPK,$(1)/etc/apk/repositories.d/distfeeds.list)
-      #   它是 `>` 重定向写盘，构建时必然把静态文件覆盖掉 → 只能改 Makefile。
-      #
-      # 原版 fanchmwrt 这里给「每个 feed 各写一行」：官方 7 条 + 第三方 5 条
-      # （passwall_luci / passwall_packages / luci_app_easytier / immortalwrt_luci /
-      #  immortalwrt_packages）。那 5 条官方站上并不存在，`apk update` 必然报错。
-      # 这里把「生成 + sed + VERSION_SED_SCRIPT」三行整体换成 printf 出固定内容。
-      #
-      # 注：镜像里的 kmods 是内核 6.12.103-1，与本固件 6.12.87~ 的 vermagic 不同，
-      #     官方/镜像的 kmod-* 装不上；纯用户态包（luci/base/packages/routing/…）不受影响。
+      # （与完整版 build.yml 同一套补丁：必须改 Makefile，
+      #  FeedSourcesAppendAPK 用 `>` 写盘会覆盖静态文件。）
       # ---------------------------------------------------------------
       - name: 写入自定义 distfeeds.list（镜像源）
         run: |
@@ -225,8 +203,6 @@ jobs:
           python3 - <<'PY'
           import pathlib
 
-          # vsean 的 6 条会 302 跳到 mirror.nju.edu.cn 的 immortalwrt（apk 会跟随跳转），
-          # pku 那条 kmods 直连 200。
           URLS = [
               "https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/targets/mediatek/filogic/packages/packages.adb",
               "https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/base/packages.adb",
@@ -266,22 +242,7 @@ jobs:
           grep -n -B1 -A1 'repositories.d/distfeeds.list' package/base-files/Makefile
 
       # ---------------------------------------------------------------
-      # 给 HomeProxy 的出厂配置加一条 DNS 服务器
-      #
-      # HomeProxy 面板「DNS → DNS 服务器」那张表 = uci 的 `config dns_server` 段，
-      # 字段定义见 htdocs/luci-static/resources/view/homeproxy/client.js 里的 GridSection：
-      #   label / enabled / type(udp,tcp,tls,https,h3,quic) / server / server_port /
-      #   path / headers / tls_sni / address_resolver
-      # 上游 openwrt-25.12 分支的 /etc/config/homeproxy 里这张表是空的，这里加一条。
-      #
-      # LuCI 包的 /etc/config/* 就是随包发布的出厂配置，装完即生效；
-      # uci-defaults/luci-homeproxy 只动 firewall，不会覆盖它。
-      #
-      # ⚠️ 生效范围：`config dns_server` 只在 routing_mode=custom 时参与 sing-box 生成
-      #    （generate_client.uc 里的 uci.foreach(uciconfig, ucidnsserver, ...) 位于
-      #     main_node 为空的那个分支）。默认 bypass_mainland_china 模式下实际解析用的是
-      #     config homeproxy 'config' 里的 dns_server / china_dns_server。
-      #     也就是说：这条只是「列表里有」，要用时在面板里选它。
+      # 给 HomeProxy 的出厂配置加一条 DNS 服务器（与完整版一致）
       # ---------------------------------------------------------------
       - name: 注入 HomeProxy 默认 DNS 条目
         run: |
@@ -333,10 +294,6 @@ jobs:
             CONFIG_PACKAGE_ddns-scripts-dnspod
             CONFIG_PACKAGE_openssh-sftp-server
             CONFIG_PACKAGE_ipt2socks
-            CONFIG_PACKAGE_simple-obfs-client
-            CONFIG_PACKAGE_v2ray-plugin
-            CONFIG_PACKAGE_shadowsocks-rust-sslocal
-            CONFIG_PACKAGE_shadowsocksr-libev-ssr-local
             CONFIG_PACKAGE_sing-box-tiny
             CONFIG_PACKAGE_bind-host
             CONFIG_PACKAGE_luci-app-pushbot
@@ -347,15 +304,9 @@ jobs:
             if grep -q "^$k=y" .config; then echo "  [OK]   $k=y"; else echo "  [FAIL] $k 未启用"; fail=1; fi
           done
 
-          # sing-box 只允许 tiny 变体：full 版和 tiny 带 CONFLICTS，同时进固件会让组装阶段报包冲突。
-          # 尤其要盯住 PassWall 的 INCLUDE_SingBox —— 它是无条件 select PACKAGE_sing-box。
-          #
-          # xray-core 同理，而且更隐蔽：它由 PassWall 的 INCLUDE_Xray 段里一句原生 Kconfig
-          #     select PACKAGE_xray-core
-          # 引入（该段定义在 luci-app-passwall/Makefile 的 define Package/.../config 里，
-          # 原样嵌进生成的 Kconfig）。Kconfig 的 select 优先级高于用户设置，
-          # 在 .config 里手写 CONFIG_PACKAGE_xray-core=n 会被 make defconfig 翻回 y。
-          # 所以要真正确保它不编译，唯一开关是 INCLUDE_Xray=n，这里再做一道闸。
+          # ★ 精简版取消列表：sing-box 只允许 tiny 变体；xray-core / geoview 与完整版相同；
+          #   另加精简版砍除的五件套（haproxy / shadowsocks-rust / shadowsocksr-libev /
+          #   simple-obfs / v2ray-plugin）。每个 select 引入项都必须把对应 INCLUDE_* 一并盯住。
           echo "===== 「取消列表」校验（必须未启用）====="
           FORBIDDEN="
             CONFIG_PACKAGE_sing-box
@@ -364,17 +315,29 @@ jobs:
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray
             CONFIG_PACKAGE_geoview
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview
+            CONFIG_PACKAGE_haproxy
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy
+            CONFIG_PACKAGE_shadowsocks-rust
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server
+            CONFIG_PACKAGE_shadowsocksr-libev
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Server
+            CONFIG_PACKAGE_simple-obfs-client
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs
+            CONFIG_PACKAGE_v2ray-plugin
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin
           "
           for k in $FORBIDDEN; do
             if grep -q "^$k=y" .config; then
-              echo "  [FAIL] $k=y —— 与既定精简目标冲突"; fail=1
+              echo "  [FAIL] $k=y —— 与精简目标冲突"; fail=1
             else
               echo "  [OK]   $k 未启用"
             fi
           done
 
-          echo "----- 代理内核实况（应只见 sing-box-tiny，无 xray-core）-----"
-          grep -E '^CONFIG_PACKAGE_(sing-box|xray-core)|^# CONFIG_PACKAGE_(sing-box|xray-core)' .config || echo "  (无)"
+          echo "----- 代理组件实况（应只见 sing-box-tiny + ipt2socks）-----"
+          grep -E '^CONFIG_PACKAGE_(sing-box|xray-core|haproxy|shadowsocks-rust|shadowsocksr-libev|simple-obfs-client|v2ray-plugin)|^# CONFIG_PACKAGE_(sing-box|xray-core|haproxy|shadowsocks-rust|shadowsocksr-libev|simple-obfs-client|v2ray-plugin)' .config || echo "  (无)"
 
           [ "$fail" -eq 0 ] || { echo "配置校验失败，终止编译"; exit 1; }
 
@@ -384,8 +347,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ env.REPO_BRANCH }}-${{ github.sha }}
-          restore-keys: ccache-${{ env.REPO_BRANCH }}-
+          key: ccache-mini-${{ env.REPO_BRANCH }}-${{ github.sha }}
+          restore-keys: ccache-mini-${{ env.REPO_BRANCH }}-
 
       - name: 下载源码包 (dl)
         run: |
@@ -410,24 +373,25 @@ jobs:
           echo "----- feeds 包（bin/packages）-----"
           echo "  apk 数量: $(find openwrt/bin/packages -name '*.apk' 2>/dev/null | wc -l)"
           du -sh openwrt/bin/packages 2>/dev/null || true
-          echo "----- 代理核心终检：xray-core 必须缺席、sing-box 必须在 -----"
+          echo "----- 代理组件终检：五件套必须全部缺席、sing-box 必须在 -----"
           MAN=$(ls openwrt/bin/targets/${{ env.TARGET }}/*.manifest 2>/dev/null | head -1)
           if [ -n "$MAN" ]; then
-            if grep -q '^xray-core ' "$MAN"; then
-              echo "  [FAIL] manifest 里出现 xray-core —— 与 INCLUDE_Xray=n 的预期不符"
-              exit 1
-            else
-              echo "  [OK]   manifest 里没有 xray-core"
-            fi
-            grep -E '^(sing-box|sing-box-tiny|luci-app-passwall|luci-app-homeproxy) ' "$MAN" || echo "  !! 未见 sing-box / passwall"
-            if grep -q '^geoview ' "$MAN"; then
-              echo "  [FAIL] manifest 里出现 geoview —— 与 INCLUDE_Geoview=n 的预期不符"
-              exit 1
-            else
-              echo "  [OK]   manifest 里没有 geoview"
-            fi
+            fail=0
+            # 被砍组件：一个都不能出现在 manifest 里
+            for bad in xray-core geoview haproxy shadowsocks-rust shadowsocksr-libev simple-obfs-client v2ray-plugin; do
+              if grep -q "^$bad " "$MAN"; then
+                echo "  [FAIL] manifest 里出现 $bad —— 与精简目标冲突"
+                fail=1
+              else
+                echo "  [OK]   manifest 里没有 $bad"
+              fi
+            done
+            # 必需组件
+            grep -E '^(sing-box|sing-box-tiny|ipt2socks|luci-app-passwall) ' "$MAN" || { echo "  [FAIL] 未见 sing-box / ipt2socks / passwall"; fail=1; }
+            if [ "$fail" -ne 0 ]; then exit 1; fi
           else
             echo "  (未找到 manifest)"
+            exit 1
           fi
           echo "----- 分区/体积对照 -----"
           echo "AX3000T stock 布局：ubi_kernel 34MB / ubi 78MB（rootfs 落在这里）"
@@ -441,9 +405,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fanchmwrt-ax3000t-stock-logs
-          # .config 是隐藏文件，upload-artifact@v4 默认会跳过隐藏文件，
-          # 不加这一行日志产物根本不会生成（run #5 就是空的）。
+          name: fanchmwrt-ax3000t-passwall-mini-logs
           include-hidden-files: true
           path: |
             openwrt/logs/
@@ -455,7 +417,7 @@ jobs:
         if: steps.compile.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: fanchmwrt-ax3000t-stock-${{ github.run_number }}
+          name: fanchmwrt-ax3000t-passwall-mini-${{ github.run_number }}
           path: |
             openwrt/bin/targets/${{ env.TARGET }}/*.bin
             openwrt/bin/targets/${{ env.TARGET }}/*.ubi
@@ -463,10 +425,6 @@ jobs:
             openwrt/bin/targets/${{ env.TARGET }}/*.tar.gz
             openwrt/bin/targets/${{ env.TARGET }}/*.manifest
             openwrt/bin/targets/${{ env.TARGET }}/packages/**
-            # ★ feeds 包在另一棵树里：bin/targets/.../packages 只放 target 自建包
-            # （kmod-* 之类，run #5 只有 117 个），而 luci-app-*、sing-box、
-            # passwall 系列、bind 等由 feeds 构建的 apk 全在 bin/packages/<arch>/<feed>/。
-            # 不加这一行，产物里就没有这些 apk，想在路由器上单独 apk add 会缺文件。
             openwrt/bin/packages/**
           if-no-files-found: warn
           retention-days: 14
