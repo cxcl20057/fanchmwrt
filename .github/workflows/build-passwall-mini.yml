@@ -151,7 +151,7 @@ jobs:
 
           ./scripts/feeds install -p luci_app_easytier  luci-app-easytier easytier
           ./scripts/feeds install -p immortalwrt_packages vlmcsd rtp2httpd
-          ./scripts/feeds install -p immortalwrt_luci   luci-app-vlmcsd luci-app-rtp2httpd luci-app-homeproxy
+          ./scripts/feeds install -p immortalwrt_luci   luci-app-vlmcsd luci-app-rtp2httpd luci-app-homeproxy luci-app-autoreboot
 
           echo "===== 3) 去重保险：第三方与官方重名的软链一律删除（官方优先）====="
           for td in passwall_luci passwall_packages luci_app_easytier \

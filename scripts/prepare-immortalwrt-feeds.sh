@@ -35,12 +35,19 @@ clone_sparse() {
   echo "    已检出：$(git -C "$dir" sparse-checkout list | tr '\n' ' ')"
 }
 
-# LuCI 应用：KMS 服务端 / RTP→HTTP 组播转单播 / HomeProxy
+# LuCI 应用：KMS 服务端 / RTP→HTTP 组播转单播 / HomeProxy / 定时重启
 # 注意：仓库根目录的 luci.mk 必须存在，因为包内用的是 include ../../luci.mk
+#
+# ★ luci-app-autoreboot 只在 immortalwrt/luci 里 —— openwrt 官方 luci feed 没有它
+#   （2026-11-17 实测：openwrt/luci@75a306df 的 applications 目录 107 个应用里无此项）。
+#   而 fanchmwrt 的 DEFAULT_PACKAGES.router 一直列着它，所以 25.12.4 那版构建时
+#   符号不存在 → 被 defconfig 静默丢弃 → 固件里没有这个应用。
+#   本版显式拉进来，保证与路由器现装清单一致。
 clone_sparse "https://github.com/immortalwrt/luci.git" "$DEST/luci" \
   applications/luci-app-vlmcsd \
   applications/luci-app-rtp2httpd \
-  applications/luci-app-homeproxy
+  applications/luci-app-homeproxy \
+  applications/luci-app-autoreboot
 
 # 对应的守护进程 / 可执行文件包
 clone_sparse "https://github.com/immortalwrt/packages.git" "$DEST/packages" \

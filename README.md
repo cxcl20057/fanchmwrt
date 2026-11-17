@@ -344,7 +344,7 @@ config dns_server
 
 | 差异 | 内容 | 处理 |
 |---|---|---|
-| 路由器多 2 条 | `luci-app-autoreboot` + `luci-i18n-autoreboot-zh-cn` | **本版补进 config**（开箱即一致，不用刷完再装） |
+| 路由器多 2 条 | `luci-app-autoreboot` + `luci-i18n-autoreboot-zh-cn` | **本版补进 config**；但该包只在 `immortalwrt/luci` 里（openwrt 官方 luci feed 无此项），所以同时把 `applications/luci-app-autoreboot` 加进稀疏拉取清单并 `feeds install -p immortalwrt_luci` |
 | 固件多 | 无 | — |
 | 版本差（非包集差） | passwall `26.9.16→26.9.27`、pushbot `6.00→6.01`、rtp2httpd `3.16.0→3.17.2` | 路由器上这些是刷机后 `apk upgrade` 从 USTC 源升上来的；新版 feeds 前移会自然跟上 |
 | 25.12.6 新增默认包 | `luci-app-fwx-firewall` / `luci-app-fwx-fastnat` / `kmod-shortcut-fe` | 按「保留上游新增」处理，不显式关闭，workflow 仅打印状态 |
