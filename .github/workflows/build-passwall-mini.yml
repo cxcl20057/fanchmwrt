@@ -7,6 +7,9 @@ name: 编译 fanchmwrt (Xiaomi AX3000T · PassWall 精简版 · 仅 sing-box)
 #   2. 仅 workflow_dispatch 手动触发，无 push 触发（避免与完整版互相拉起编译）。
 #   3. 取消列表校验与 manifest 终检覆盖全部被砍组件。
 #   其余步骤（distfeeds 镜像源 / HomeProxy DNS 注入 / 其他应用）与完整版完全一致。
+#
+# 2026-11-17 升级到 fanchmwrt-25.12.6（内核 6.12.112，新增 shortcut-fe 软加速），
+#   插件集对齐路由器现装清单：补 luci-app-autoreboot，上游新增的三项按「保留默认」处理。
 
 on:
   workflow_dispatch:
@@ -26,7 +29,8 @@ concurrency:
 
 env:
   REPO_URL: https://github.com/fanchmwrt/fanchmwrt
-  REPO_BRANCH: fanchmwrt-25.12.4
+  # 2026-11-17 升级：25.12.4 → 25.12.6（内核 6.12.87 → 6.12.112，新增 shortcut-fe 软加速）
+  REPO_BRANCH: fanchmwrt-25.12.6
   CONFIG_FILE: config/ax3000t-passwall-mini.config
   IMM_SRC: immortalwrt-src
   TARGET: mediatek/filogic
@@ -195,6 +199,12 @@ jobs:
       # 把 base-files 生成的 distfeeds.list 换成「自选镜像源」固定 7 条
       # （与完整版 build.yml 同一套补丁：必须改 Makefile，
       #  FeedSourcesAppendAPK 用 `>` 写盘会覆盖静态文件。）
+      #
+      # 2026-11-17 变更：镜像源换成 USTC 的 immortalwrt 25.12.2 ——
+      #   与路由器现网 /etc/apk/repositories.d/distfeeds.list 完全一致（实测逐条 200）。
+      #   ⚠️ kmods 那条固定为 6.12.103-1-b5b7729f，与 25.12.6 的内核 6.12.112
+      #      vermagic 不同 → kmod-* 装不上（纯用户态包不受影响）。
+      #      这是 immortalwrt 25.12.2 发布镜像的既有情况，用户现网同样如此。
       # ---------------------------------------------------------------
       - name: 写入自定义 distfeeds.list（镜像源）
         run: |
@@ -203,14 +213,15 @@ jobs:
           python3 - <<'PY'
           import pathlib
 
+          # USTC · immortalwrt 25.12.2（与路由器现网 distfeeds.list 逐字一致）
           URLS = [
-              "https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/targets/mediatek/filogic/packages/packages.adb",
-              "https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/base/packages.adb",
-              "https://mirrors.pku.edu.cn/immortalwrt/releases/25.12-SNAPSHOT/targets/mediatek/filogic/kmods/6.12.103-1-b5b7729ffbba3ecdd83f339de8fadfb8//packages.adb",
-              "https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/luci/packages.adb",
-              "https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/packages/packages.adb",
-              "https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/routing/packages.adb",
-              "https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/telephony/packages.adb",
+              "https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/targets/mediatek/filogic/packages/packages.adb",
+              "https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/base/packages.adb",
+              "https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/targets/mediatek/filogic/kmods/6.12.103-1-b5b7729ffbba3ecdd83f339de8fadfb8/packages.adb",
+              "https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/luci/packages.adb",
+              "https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/packages/packages.adb",
+              "https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/routing/packages.adb",
+              "https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/telephony/packages.adb",
           ]
 
           p = pathlib.Path("package/base-files/Makefile")
@@ -298,6 +309,8 @@ jobs:
             CONFIG_PACKAGE_bind-host
             CONFIG_PACKAGE_luci-app-pushbot
             CONFIG_PACKAGE_luci-i18n-pushbot-zh-cn
+            CONFIG_PACKAGE_luci-app-autoreboot
+            CONFIG_PACKAGE_luci-i18n-autoreboot-zh-cn
           "
           fail=0
           for k in $REQUIRED; do
@@ -338,6 +351,15 @@ jobs:
 
           echo "----- 代理组件实况（应只见 sing-box-tiny + ipt2socks）-----"
           grep -E '^CONFIG_PACKAGE_(sing-box|xray-core|haproxy|shadowsocks-rust|shadowsocksr-libev|simple-obfs-client|v2ray-plugin)|^# CONFIG_PACKAGE_(sing-box|xray-core|haproxy|shadowsocks-rust|shadowsocksr-libev|simple-obfs-client|v2ray-plugin)' .config || echo "  (无)"
+
+          # 25.12.6 默认包列表新增的三项：本版选择「保留上游新增」，
+          # 因此这里只做信息输出（不判失败），方便与上一版固件对比。
+          echo "----- 25.12.6 新增默认包实况（信息，不判失败）-----"
+          for k in CONFIG_PACKAGE_luci-app-fwx-firewall \
+                   CONFIG_PACKAGE_luci-app-fwx-fastnat \
+                   CONFIG_PACKAGE_kmod-shortcut-fe; do
+            if grep -q "^$k=y" .config; then echo "  [新增] $k=y"; else echo "  [未选中] $k"; fi
+          done
 
           [ "$fail" -eq 0 ] || { echo "配置校验失败，终止编译"; exit 1; }
 
@@ -388,6 +410,13 @@ jobs:
             done
             # 必需组件
             grep -E '^(sing-box|sing-box-tiny|ipt2socks|luci-app-passwall) ' "$MAN" || { echo "  [FAIL] 未见 sing-box / ipt2socks / passwall"; fail=1; }
+            echo "----- 内核 / 版本对齐路由器的关键包 -----"
+            grep -E '^(kernel|base-files|luci-app-autoreboot|luci-app-passwall|luci-app-pushbot|rtp2httpd) ' "$MAN" || true
+            grep -q '^luci-app-autoreboot ' "$MAN" || { echo "  [FAIL] manifest 里没有 luci-app-autoreboot（应与路由器现装一致）"; fail=1; }
+            echo "----- 25.12.6 新增项实况（信息，不判失败）-----"
+            for k in luci-app-fwx-firewall luci-app-fwx-fastnat kmod-shortcut-fe; do
+              if grep -q "^$k " "$MAN"; then echo "  [有] $k"; else echo "  [无] $k"; fi
+            done
             if [ "$fail" -ne 0 ]; then exit 1; fi
           else
             echo "  (未找到 manifest)"

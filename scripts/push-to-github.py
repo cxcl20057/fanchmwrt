@@ -183,7 +183,37 @@ if code not in (200, 201):
 tree_sha = r["sha"]
 
 code, r = call("POST", f"/repos/{OWNER}/{REPO}/git/commits", {
-    "message": "feat: mini 版新增 iperf3（网络测速，packages feed v3.20）\n\n编译器：fanchmwrt-25.12.4 / mediatek-filogic / xiaomi_mi-router-ax3000t (stock)\n仅改 config/ax3000t-passwall-mini.config，其余文件内容不变。\n\n- 新增 CONFIG_PACKAGE_iperf3=y（提供 /usr/bin/iperf3）；\n  libiperf3 由依赖自动选中；iperf3-ssl 保持关闭。\n- 本改动已在本机 VM 增量重编验证（build-on-vm.sh conf build collect）：\n  35 项配置校验全绿，manifest 含 iperf3。\n- PassWall 精简结构（仅 sing-box-tiny + ipt2socks）、其余应用、\n  distfeeds 镜像源补丁、HomeProxy DNS 注入均与上一版一致。\n",
+    "message": "feat: 升级到 fanchmwrt-25.12.6 + 插件集对齐路由器现装清单\n\n"
+    "编译器：fanchmwrt-25.12.6 / mediatek-filogic / xiaomi_mi-router-ax3000t (stock)\n"
+    "基线：25.12.4（内核 6.12.87）→ 25.12.6（内核 6.12.112，上游 +388 commits）\n\n"
+    "【1) 源码分支升级】\n"
+    "- .github/workflows/build-passwall-mini.yml：REPO_BRANCH 25.12.4 → 25.12.6。\n"
+    "- 25.12.6 相对 25.12.4：内核 6.12.87 → 6.12.112；feeds 全部前移\n"
+    "  （packages/luci/routing 三个 pin 都换新）；新增 shortcut-fe 软加速。\n\n"
+    "【2) 插件集对齐路由器现装清单（实测 330 个包逐条比对）】\n"
+    "- 路由器实装 = 上一版固件 328 包 + luci-app-autoreboot（刷完后从 USTC 源补装）。\n"
+    "  故本版新增 CONFIG_PACKAGE_luci-app-autoreboot / luci-i18n-autoreboot-zh-cn。\n"
+    "- 差异只有这一项：其余 326 个包名逐一命中的；版本差异（passwall 26.9.16→26.9.27、\n"
+    "  pushbot 6.00→6.01、rtp2httpd 3.16.0→3.17.2）来自路由器后续 apk 升级，\n"
+    "  本版因为 feeds 前移会自然跟上。\n"
+    "- 25.12.6 默认包列表新增 luci-app-fwx-firewall / luci-app-fwx-fastnat /\n"
+    "  kmod-shortcut-fe，按「保留上游新增」处理：不显式关闭，workflow 中仅做信息输出。\n\n"
+    "【3) distfeeds 镜像源换成 USTC immortalwrt 25.12.2】\n"
+    "- 7 条 URL 与路由器现网 /etc/apk/repositories.d/distfeeds.list 逐字一致（实测 200）。\n"
+    "- 为什么换：上一版内置的 vsean/openwrt 25.12-SNAPSHOT 与用户实际使用的不一致，\n"
+    "  且 USTC 这套是唯一实测可用的 immortalwrt 发布镜像（25.12-SNAPSHOT 路径 404）。\n"
+    "- ⚠️ kmods 固定 6.12.103-1，与 25.12.6 的 6.12.112 vermagic 不同 → kmod-* 装不上；\n"
+    "  纯用户态包不受影响（用户现网同样如此）。\n\n"
+    "【校验增强】\n"
+    "- REQUIRED 增加 luci-app-autoreboot + i18n（缺则直接失败）。\n"
+    "- manifest 终检新增：autoreboot 必须存在；打印 kernel/base-files/passwall/pushbot/\n"
+    "  rtp2httpd 版本；25.12.6 新增三项只做信息输出。\n\n"
+    "【保留不变】\n"
+    "- PassWall 仅 sing-box-tiny + ipt2socks；xray-core / geoview / haproxy / ss-rust /\n"
+    "  ssr-libev / simple-obfs / v2ray-plugin 仍全部未编译（18 项取消列表校验）。\n"
+    "- HomeProxy DNS 注入、iperf3、pushbot、bind-host、EasyTier / frps / vlmcsd /\n"
+    "  rtp2httpd / DDNS 全部保留。\n",
+
     "tree": tree_sha,
     "parents": [head_sha],
 })

@@ -2,7 +2,7 @@
 
 ## 一句话结论
 
-以 `fanchmwrt/fanchmwrt@fanchmwrt-25.12.4` 为基线，**用 OpenWrt 官方 feed 满足绝大部分插件**，
+以 `fanchmwrt/fanchmwrt@fanchmwrt-25.12.6` 为基线（2026-11-17 由 25.12.4 升级，内核 6.12.87 → 6.12.112），**用 OpenWrt 官方 feed 满足绝大部分插件**，
 只对官方 feed 里确实没有的包引入第三方源；immortalwrt 采用 **稀疏拉取 + 白名单安装**，
 不整仓挂载，从而避开重名包冲突和对 luci feed 补丁的破坏。设备固定为
 `mediatek/filogic → xiaomi_mi-router-ax3000t`（stock 布局）。
@@ -169,7 +169,7 @@ run #7（去 xray + 换 tiny）的 artifact 共 **212.93 MB**（含全量 apk �
 | 编译到一半 OOM | `-j5` 在 16GB runner 上跑满 | 把 `make -j$(( $(nproc) + 1 ))` 改成 `make -j2` |
 | 打不开 `luci-app-rtp2httpd` 页面但装上了 | 只装了 LuCI 没装守护进程 | 配置里已同时勾了 `rtp2httpd`，校验步骤会拦；若手动改动请一并保留 |
 | 刷完后 `apk update` 报某条源取不到（`Not Found` / `temporary error`） | 原版 fanchmwrt 用 `FeedSourcesAppendAPK` 把 **所有** feed 都写成 `downloads.openwrt.org/.../<feed>/packages.adb`，其中 `passwall_luci`、`passwall_packages`、`luci_app_easytier`、`immortalwrt_luci`、`immortalwrt_packages` 这 5 个第三方 feed 在官方下载站上**根本不存在**（它只发布 7 个目录），必然 404 | 本方案已修：把 `base-files/Makefile` 的生成段整体换成 `printf` 写死的 **7 条镜像源**。见第九节 |
-| 装 kmod 报 `cannot satisfy dependency` / vermagic 不符 | 镜像里的 kmods 目录是内核 `6.12.103-1-b5b7729ffbba3ecdd83f339de8fadfb8`，本固件是 `6.12.87~f6c834707c435c09f2147f1e1358ba32`（fanchmwrt-25.12.4），vermagic 不同 → `kmod-*` 一个都装不上 | 只能改 `.config` 重编（本方案已撤掉自建源，不再有配套的 kmod 渠道）；纯用户态包不受影响 |
+| 装 kmod 报 `cannot satisfy dependency` / vermagic 不符 | 镜像里的 kmods 目录是内核 `6.12.103-1-b5b7729ffbba3ecdd83f339de8fadfb8`，本固件是 `6.12.112`（fanchmwrt-25.12.6），vermagic 不同 → `kmod-*` 一个都装不上 | 只能改 `.config` 重编（本方案已撤掉自建源，不再有配套的 kmod 渠道）；纯用户态包不受影响 |
 | `apk add` 报 `UNTRUSTED signature` | 镜像索引的签名钥匙与本固件自带的钥匙（`/etc/apk/keys/`）不一定匹配 | 先试 `apk update`；若报不信任，加 `--allow-untrusted`（run #7 实机已装成过这套镜像，以实机结果为准） |
 | 刷机后想回官方小米固件 | stock 布局未动 U-Boot | 直接走小米官方恢复流程即可 |
 
@@ -259,23 +259,25 @@ HomeProxy 走的是虚拟依赖 `+sing-box`，tiny 因为 `PROVIDES:=sing-box` �
 > ⚠️ 为什么不能只往 `package/base-files/files/etc/apk/repositories.d/` 里放个同名文件：
 > `FeedSourcesAppendAPK` 是用 `>` 重定向写盘的，构建时必然把静态文件覆盖掉。所以只能改 Makefile（`package/base-files/Makefile` 第 254 行附近）。
 
-### 9.2 固定的 7 条（实测可达，2026-09-26 逐条 `curl` 验过）
+### 9.2 固定的 7 条（2026-11-17 起改为 USTC immortalwrt 25.12.2，逐条 `curl` 实测 200）
+
+> 换源原因：上一版内置的是 vsean/openwrt 25.12-SNAPSHOT，与路由器实际在用的源不一致。
+> 现固件内置的 7 条与路由器 `/etc/apk/repositories.d/distfeeds.list` **逐字一致**。
 
 | 用途 | 地址 |
 |---|---|
-| target 包 | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/targets/mediatek/filogic/packages/packages.adb` |
-| base | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/base/packages.adb` |
-| kmods | `https://mirrors.pku.edu.cn/immortalwrt/releases/25.12-SNAPSHOT/targets/mediatek/filogic/kmods/6.12.103-1-b5b7729ffbba3ecdd83f339de8fadfb8//packages.adb` |
-| luci | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/luci/packages.adb` |
-| packages | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/packages/packages.adb` |
-| routing | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/routing/packages.adb` |
-| telephony | `https://mirrors.vsean.net/openwrt/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/telephony/packages.adb` |
+| target 包 | `https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/targets/mediatek/filogic/packages/packages.adb` |
+| base | `https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/base/packages.adb` |
+| kmods | `https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/targets/mediatek/filogic/kmods/6.12.103-1-b5b7729ffbba3ecdd83f339de8fadfb8/packages.adb` |
+| luci | `https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/luci/packages.adb` |
+| packages | `https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/packages/packages.adb` |
+| routing | `https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/routing/packages.adb` |
+| telephony | `https://mirrors.ustc.edu.cn/immortalwrt/releases/25.12.2/packages/aarch64_cortex-a53/telephony/packages.adb` |
 
-实测详情：
+实测详情（2026-11-17）：
 
-- vsean 那 6 条返回 **302**，`Location` 指向 `mirror.nju.edu.cn/immortalwrt/...`，跟随跳转后 **200**；
-- pku 那条 kmods 直连 **200**，URL 里 `kmods/<kver>//packages.adb` 的双斜杠由服务端归一，不影响；
-- 镜像里的 kmods 是内核 **6.12.103-1** 的，本固件是 **6.12.87~f6c83470...**（fanchmwrt-25.12.4），所以 **`kmod-*` 装不上**；纯用户态包不受影响。
+- 7 条全部 **200**；USTC 的 `25.12-SNAPSHOT` 路径 **404**，只有 `releases/25.12.2` 可用；
+- 镜像里的 kmods 是内核 **6.12.103-1**，本固件（25.12.6）是 **6.12.112**，所以 **`kmod-*` 装不上**；纯用户态包不受影响（路由器现网同样如此）。
 
 ### 9.3 在路由器上验证
 
@@ -319,3 +321,43 @@ config dns_server
 上游出厂配置里这张表本来是**空的**，所以刷完机进面板就能看到这一条。
 
 > ⚠️ **生效范围**：`config dns_server` 只在 `routing_mode = custom` 时参与 sing-box 配置生成 —— `root/etc/homeproxy/scripts/generate_client.uc` 里那段 `uci.foreach(uciconfig, ucidnsserver, ...)` 位于 `main_node` 为空的 `else if` 分支。默认的 `bypass_mainland_china` 模式下，实际解析用的是 `config homeproxy 'config'` 里的 `dns_server`（出厂值 `8.8.8.8`）与 `china_dns_server`（`223.5.5.5`）。也就是说：**这条只是「列表里有」，要在面板里选中它（或切到 custom 路由模式）才会真正用上。**
+
+---
+
+## 十一、2026-11-17 升级：25.12.4 → 25.12.6 与「插件对齐路由器」
+
+### 11.1 上游发生了什么
+
+| 项 | fanchmwrt-25.12.4（旧） | fanchmwrt-25.12.6（新） |
+|---|---|---|
+| HEAD | `7c2f32be`（2026-10-22） | `11b65ca6a`（2026-11-05） |
+| 相对差距 | — | **+388 / -33** 提交，300 个文件 |
+| 内核 | 6.12.87 | **6.12.112** |
+| feeds pin | packages `f91b06b3` / luci `e9ebca75` / routing `b2097c85` | `093d5516` / `75a306df` / `48c80803` |
+| 新功能 | — | **shortcut-fe 软加速**（内核 hook 补丁 + `luci-app-fwx-fastnat`） |
+
+升级只改三处：`REPO_BRANCH` 改分支、config 头部版本号、默认包列表带来的新增项。
+
+### 11.2 插件集对齐（实测逐条比对路由器）
+
+做法：路由器 `apk list -I` 导出 330 个包名，与本项目上一版固件 manifest（328 行）做名称级 diff。
+
+| 差异 | 内容 | 处理 |
+|---|---|---|
+| 路由器多 2 条 | `luci-app-autoreboot` + `luci-i18n-autoreboot-zh-cn` | **本版补进 config**（开箱即一致，不用刷完再装） |
+| 固件多 | 无 | — |
+| 版本差（非包集差） | passwall `26.9.16→26.9.27`、pushbot `6.00→6.01`、rtp2httpd `3.16.0→3.17.2` | 路由器上这些是刷机后 `apk upgrade` 从 USTC 源升上来的；新版 feeds 前移会自然跟上 |
+| 25.12.6 新增默认包 | `luci-app-fwx-firewall` / `luci-app-fwx-fastnat` / `kmod-shortcut-fe` | 按「保留上游新增」处理，不显式关闭，workflow 仅打印状态 |
+
+> ⚠️ `shortcut-fe` 是 flow offload 类软加速，与 PassWall 的 nftables tproxy 分流存在潜在冲突风险。本版按用户决定保留；若发现分流异常，优先在 LuCI 里关掉 fastnat 再试。
+
+### 11.3 验证方式
+
+```sh
+# 路由器侧导出清单（busybox 无 comm，用 grep -vxF 替代）
+apk list -I | awk '{print $1}' | sort > /tmp/a2.txt
+# 本地 manifest 形如 "name - version"，转成 "name-version" 后比
+awk 'NF>=3{print $1"-"$3}' <manifest> | sort > /tmp/m2.txt
+```
+
+workflow 里已把 `luci-app-autoreboot` 加进 REQUIRED（缺则直接失败），manifest 终检会打印 kernel / base-files / passwall / pushbot / rtp2httpd 的实际版本。
